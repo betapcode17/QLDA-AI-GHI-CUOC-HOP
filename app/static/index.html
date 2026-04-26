@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Ghi biên bản cuộc họp</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar" aria-label="Application header">
+        <div>
+          <p class="eyebrow">Local CPU Workspace</p>
+          <h1>AI ghi biên bản và tổng hợp cuộc họp</h1>
+        </div>
+        <div class="system-strip" id="modelStatus" aria-live="polite">
+          <span class="dot pending"></span>
+          <span>Checking models</span>
+        </div>
+      </header>
+
+      <section class="workspace" aria-label="Meeting processing workspace">
+        <section class="recorder-pane">
+          <div class="recorder-head">
+            <div>
+              <p class="eyebrow">Recorder</p>
+              <h2>Ghi âm cuộc họp</h2>
+            </div>
+            <div class="timer" id="timer">00:00</div>
+          </div>
+
+          <div class="wave-stage">
+            <canvas id="waveform" width="1200" height="360" aria-label="Audio waveform"></canvas>
+            <div class="record-state" id="recordState">Ready</div>
+          </div>
+
+          <div class="controls" aria-label="Recording controls">
+            <button class="icon-button primary" id="recordBtn" type="button" title="Record">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"></circle></svg>
+              <span>Record</span>
+            </button>
+            <button class="icon-button" id="stopBtn" type="button" title="Stop" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>
+              <span>Stop</span>
+            </button>
+            <button class="icon-button" id="processBtn" type="button" title="Process" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
+              <span>Process</span>
+            </button>
+            <label class="file-button" title="Import audio">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4-4 4M5 17v3h14v-3"></path></svg>
+              <span>Import</span>
+              <input id="fileInput" type="file" accept="audio/*,video/*" />
+            </label>
+          </div>
+
+          <audio id="playback" controls hidden></audio>
+
+          <div class="options" aria-label="Processing options">
+            <label>
+              <span>Language</span>
+              <select id="languageSelect">
+                <option value="vi" selected>Vietnamese</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+            <label>
+              <span>Translate</span>
+              <select id="translateSelect">
+                <option value="vi-en" selected>VI to EN</option>
+                <option value="">Off</option>
+                <option value="en-vi">EN to VI</option>
+              </select>
+            </label>
+            <label class="toggle">
+              <input id="diarizationToggle" type="checkbox" checked />
+              <span>Diarization</span>
+            </label>
+            <label class="toggle">
+              <input id="summaryToggle" type="checkbox" checked />
+              <span>Summary</span>
+            </label>
+          </div>
+
+          <div class="pipeline" id="pipeline">
+            <span data-step="record">Record</span>
+            <span data-step="upload">Upload</span>
+            <span data-step="stt">STT</span>
+            <span data-step="diarize">Speakers</span>
+            <span data-step="summary">Summary</span>
+          </div>
+        </section>
+
+        <section class="results-pane" aria-label="Meeting outputs">
+          <div class="result-section summary-section">
+            <div class="section-head">
+              <p class="eyebrow">Minutes</p>
+              <button class="ghost-button" id="copyBtn" type="button" title="Copy result" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h10v12H8zM6 16H4V4h12v2"></path></svg>
+                <span>Copy</span>
+              </button>
+            </div>
+            <h2>Tóm tắt nội dung</h2>
+            <div class="warning-output" id="warningOutput" hidden></div>
+            <div class="summary-output" id="summaryOutput">No summary yet.</div>
+          </div>
+
+          <div class="result-grid">
+            <section class="result-section">
+              <p class="eyebrow">Transcript</p>
+              <div class="transcript" id="transcriptOutput">No transcript yet.</div>
+            </section>
+            <section class="result-section">
+              <p class="eyebrow">Speakers</p>
+              <div class="speaker-list" id="speakerOutput">No speaker segments yet.</div>
+            </section>
+          </div>
+
+          <section class="result-section">
+            <p class="eyebrow">Translation</p>
+            <div class="translation-output" id="translationOutput">No translation yet.</div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
