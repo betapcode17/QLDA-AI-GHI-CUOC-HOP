@@ -1,32 +1,48 @@
-from __future__ import annotations
+import requests
 
-import json
-import sys
-from pathlib import Path
+SAMPLE_TRANSCRIPT = "Hom nay chung ta hop ve tien do backend..."
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+OLLAMA_URL = "http://localhost:11434/api/chat"
+MODEL_NAME = "qwen2.5:3b"
 
 
-SAMPLE_TRANSCRIPT = (
-    "SPEAKER_00 [0.00s-8.20s]: Hom nay chung ta hop ve tien do backend va giao dien. "
-    "Anh Nam se hoan thanh API upload truoc thu Sau. "
-    "SPEAKER_01 [8.30s-14.00s]: Chi Lan phu trach kiem thu va bao cao loi vao ngay mai. "
-    "Quyet dinh: uu tien sua loi diarization truoc khi demo."
-)
+def call_ollama(prompt: str):
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "stream": False
+    }
+
+    res = requests.post(OLLAMA_URL, json=payload)
+    res.raise_for_status()
+    return res.json()
 
 
-def main() -> int:
-    from app.services.llm_service import llm_service
+def main():
+    print("🤖 Calling Ollama...")
 
-    result = llm_service.refine_meeting(SAMPLE_TRANSCRIPT)
-    print(f"model: {llm_service.config.model}")
-    print(f"base_url: {llm_service.config.base_url}")
-    print(json.dumps(result.model_dump(), ensure_ascii=False, indent=2))
-    return 0 if result.error is None else 1
+    prompt = f"""
+You are an AI meeting assistant.
+
+Summarize and extract tasks:
+
+{SAMPLE_TRANSCRIPT}
+
+Return JSON:
+{{
+  "summary": "",
+  "tasks": [],
+  "decisions": []
+}}
+"""
+
+    response = call_ollama(prompt)
+
+    print("\n===== RESULT =====")
+    print(response["message"]["content"])
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
