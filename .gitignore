@@ -1,0 +1,18 @@
+.venv/
+.hf/
+.cache/
+.tmp/
+tmp/
+data/uploads/
+data/processed/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local model files are large and should be downloaded locally, not committed.
+models/
+
+.env    
+
+frontend/node_modules/
+
