@@ -6,6 +6,7 @@ import MeetingsList from '../pages/MeetingsList';
 import NotFound from '../pages/NotFound';
 import Recording from '../pages/Recording';
 import Settings from '../pages/Settings';
+import UploadAudio from '../pages/UploadAudio';
 
 const router = createBrowserRouter([
   {
@@ -14,6 +15,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Dashboard /> },
       { path: 'recording', element: <Recording /> },
+      { path: 'upload-audio', element: <UploadAudio /> },
       { path: 'meetings', element: <MeetingsList /> },
       { path: 'meetings/:id', element: <MeetingDetail /> },
       { path: 'settings', element: <Settings /> },

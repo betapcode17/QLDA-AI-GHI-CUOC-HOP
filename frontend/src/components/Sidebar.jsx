@@ -4,6 +4,7 @@ import logo from '../assets/logo.svg';
 const items = [
   { label: 'Dashboard', to: '/' },
   { label: 'Recording', to: '/recording' },
+  { label: 'Upload Audio', to: '/upload-audio' },
   { label: 'Meetings', to: '/meetings' },
   { label: 'Settings', to: '/settings' },
 ];
