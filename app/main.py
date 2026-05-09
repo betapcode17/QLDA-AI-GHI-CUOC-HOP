@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -8,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import torch
 
 from app.config import PROJECT_ROOT, settings
 from app.schemas import (
@@ -34,6 +37,18 @@ from app.services.summarization import summarization_service
 from app.services.translation import translation_service
 
 
+def configure_console_encoding() -> None:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace") # type: ignore
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")# type: ignore
+    except Exception:
+        pass
+
+
+configure_console_encoding()
+
+
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
@@ -55,6 +70,13 @@ async def startup_preload_models():
     """Preload all models at startup for faster inference."""
     print("\n" + "=" * 80)
     print("🚀 STARTUP: Preloading models into RAM...")
+    print(f"[STARTUP][DEBUG] torch.cuda.is_available(): {torch.cuda.is_available()}")
+    print(f"[STARTUP][DEBUG] torch.version.cuda: {getattr(getattr(torch, 'version', None), 'cuda', None)}")
+    print(f"[STARTUP][DEBUG] torch build: {torch.__version__}")
+    print(f"[STARTUP][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+    print(f"[STARTUP][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+    if not torch.cuda.is_available():
+        print("[STARTUP][WARN] PyTorch is CPU-only or CUDA is unavailable. STT will run on CPU.")
     print("=" * 80)
     
     try:
@@ -139,7 +161,7 @@ def favicon() -> FileResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", device="cpu", models=get_model_statuses())
+    return HealthResponse(status="ok", device=settings.model_device, models=get_model_statuses())
 
 
 @app.get("/health/llm", response_model=LLMHealthResponse)
@@ -190,12 +212,18 @@ async def transcribe_audio(
     language: Annotated[str, Query(description="Language hint for faster-whisper.")] = "vi",
 ) -> TranscriptionResponse:
     try:
+        print(f"[API][DEBUG] /api/transcribe requested: file={file.filename}, language={language}")
+        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
         uploaded_path = await save_uploaded_audio(file)
         normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
         return await run_in_threadpool(stt_service.transcribe, normalized_path, language)
     except HTTPException:
         raise
     except Exception as exc:
+        import traceback
+        print(f"[API][ERROR] Transcription failed: {exc}")
+        print(traceback.format_exc())
         raise to_http_error(exc) from exc
 
 
@@ -212,6 +240,8 @@ async def transcribe_with_speakers(
         print(f"\n{'='*80}")
         print(f"[API] /api/transcribe-with-speakers request")
         print(f"[API] File: {file.filename}, Language: {language}")
+        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
         print(f"{'='*80}")
         
         uploaded_path = await save_uploaded_audio(file)

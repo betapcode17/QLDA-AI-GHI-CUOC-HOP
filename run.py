@@ -17,7 +17,21 @@ import urllib.request
 import json
 import time
 import argparse
+import socket
 from pathlib import Path
+import torch
+
+
+def configure_console_encoding() -> None:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+configure_console_encoding()
 
 
 class Colors:
@@ -49,6 +63,27 @@ def print_error(text: str):
 
 def print_info(text: str):
     print(f"{Colors.BLUE}[INFO]{Colors.END} {text}")
+
+
+def check_runtime_device():
+    """Show whether the Python environment can use CUDA."""
+    print_info("Checking runtime device...")
+    try:
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            cuda_version = torch.version.cuda or "unknown"
+            print_success(f"Running on CUDA")
+            print_info(f"  GPU: {gpu_name}")
+            print_info(f"  CUDA: {cuda_version}")
+            return True
+
+        print_warning("CUDA is not available in the current Python environment")
+        print_info(f"  Torch build: {torch.__version__}")
+        print_info("  The server will run on CPU unless you install a CUDA-enabled PyTorch build.")
+        return False
+    except Exception as e:
+        print_warning(f"Could not inspect runtime device: {e}")
+        return False
 
 
 def check_ollama():
@@ -114,6 +149,16 @@ def check_models():
         return False
 
 
+def is_port_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Start QLDA-AI-GHI-CUOC-HOP FastAPI Server"
@@ -121,7 +166,7 @@ def main():
     parser.add_argument("--no-check", action="store_true", help="Skip pre-flight checks")
     parser.add_argument("--port", type=int, default=8000, help="Port to run on (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)")
-    parser.add_argument("--reload", action="store_true", default=True, help="Auto-reload on code change")
+    parser.add_argument("--reload", action="store_true", help="Auto-reload on code change")
     
     args = parser.parse_args()
     
@@ -136,6 +181,7 @@ def main():
         checks = {
             "Ollama Service": check_ollama(),
             "Local Models": check_models(),
+            "Runtime Device": check_runtime_device(),
         }
         
         if not all(checks.values()):
@@ -144,22 +190,33 @@ def main():
         else:
             print_success("All checks passed!")
             time.sleep(1)
+
+    if not is_port_available(args.host, args.port):
+        print_error(f"Port {args.port} is already in use on host {args.host}")
+        print_info("Stop the running server or start this one on a different port, for example:")
+        print_info(f"  python run.py --port {args.port + 1}")
+        return 1
     
     # Start server
     print_header("Starting FastAPI Server")
     print_info(f"Open in browser: http://localhost:{args.port}")
     print_info(f"API Docs: http://localhost:{args.port}/docs")
     print_info(f"ReDoc: http://localhost:{args.port}/redoc\n")
+    if args.reload:
+        print_info("Auto-reload is enabled")
+        print_info("  Uvicorn will watch the application code only to avoid scanning the full workspace.")
     print(f"{Colors.BOLD}Press Ctrl+C to stop the server{Colors.END}\n")
     
     try:
-        subprocess.run([
+        uvicorn_args = [
             sys.executable, "-m", "uvicorn",
             "app.main:app",
-            "--reload" if args.reload else "",
             "--host", args.host,
             "--port", str(args.port),
-        ], check=True)
+        ]
+        if args.reload:
+            uvicorn_args.extend(["--reload", "--reload-dir", str(Path(__file__).resolve().parent / "app")])
+        subprocess.run(uvicorn_args, check=True)
     except KeyboardInterrupt:
         print(f"\n{Colors.YELLOW}Server stopped by user{Colors.END}")
         return 0

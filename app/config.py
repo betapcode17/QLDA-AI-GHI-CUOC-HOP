@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import torch
 
 # Load .env file if it exists
 try:
@@ -49,6 +50,12 @@ def configure_local_environment() -> None:
     os.environ.setdefault("TRANSFORMERS_NO_TORCHCODEC", "1")
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
+    # Runtime device preferences
+    os.environ.setdefault("MODEL_DEVICE", "auto")
+    os.environ.setdefault("STT_DEVICE", "cuda")
+    os.environ.setdefault("STT_COMPUTE_TYPE", "auto")
+    os.environ.setdefault("STT_CPU_THREADS", str(min(8, os.cpu_count() or 4)))
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -63,8 +70,9 @@ class Settings:
     
     # Language and STT settings
     default_language: str = "vi"
-    stt_compute_type: str = "int8"
-    stt_cpu_threads: int = 4
+    stt_device: str = os.environ.get("STT_DEVICE", "cuda")
+    stt_compute_type: str = os.environ.get("STT_COMPUTE_TYPE", "auto")
+    stt_cpu_threads: int = max(1, int(os.environ.get("STT_CPU_THREADS", "4")))
     stt_initial_prompt: str = (
         "Biên bản cuộc họp tiếng Việt. Nội dung có thể gồm thảo luận, ý kiến, "
         "nhiệm vụ, kết luận, kiểm tra âm thanh, a lô, một hai."
@@ -74,6 +82,8 @@ class Settings:
         "kết luận, rủi ro, tiến độ"
     )
     stt_vad_min_duration_seconds: float = 8.0
+    stt_max_new_tokens: int = int(os.environ.get("STT_MAX_NEW_TOKENS", "440"))
+    stt_chunk_duration_seconds: int = int(os.environ.get("STT_CHUNK_DURATION", "30"))
     min_diarization_duration_seconds: float = 8.0
     audio_sample_rate: int = 16000
     
@@ -96,6 +106,37 @@ class Settings:
     def ollama_chat_url(self) -> str:
         """URL for Ollama /api/chat endpoint"""
         return f"{self.ollama_base_url.rstrip('/')}/api/chat"
+
+    @property
+    def model_device(self) -> str:
+        preferred = os.environ.get("MODEL_DEVICE", "auto").lower()
+        if preferred in {"cuda", "gpu"} and torch.cuda.is_available():
+            return "cuda"
+        if preferred == "cpu":
+            return "cpu"
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    @property
+    def is_gpu_enabled(self) -> bool:
+        return self.model_device == "cuda"
+
+    @property
+    def resolved_stt_device(self) -> str:
+        preferred = self.stt_device.lower()
+        if preferred in {"cuda", "gpu"} and torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
+    @property
+    def stt_torch_dtype(self):
+        return torch.float16 if self.resolved_stt_device == "cuda" else torch.float32
+
+    @property
+    def resolved_stt_compute_type(self) -> str:
+        requested = self.stt_compute_type.lower()
+        if requested != "auto":
+            return requested
+        return "float16" if self.resolved_stt_device == "cuda" else "int8"
 
 
 configure_local_environment()

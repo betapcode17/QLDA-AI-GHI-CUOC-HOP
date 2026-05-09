@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from threading import Lock
+import torch
 
 from app.config import settings
 
@@ -59,7 +60,7 @@ class SummarizationService:
                 self._model.generation_config.max_length = None
                 if hasattr(self._model.config, "max_length"):
                     self._model.config.max_length = None
-                self._model.to("cpu")
+                self._model.to(settings.model_device)
                 self._model.eval()
         return self._tokenizer, self._model
 
@@ -116,10 +117,9 @@ class SummarizationService:
                 break
 
     def _summarize_chunk(self, text: str, max_new_tokens: int, min_new_tokens: int) -> str:
-        import torch
-
         tokenizer, model = self._load()
         inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = {key: value.to(settings.model_device) for key, value in inputs.items()}
         input_length = int(inputs["input_ids"].shape[-1])
         safe_max = min(max_new_tokens, max(32, input_length // 2))
         safe_min = min(min_new_tokens, max(8, safe_max // 2))
@@ -130,7 +130,7 @@ class SummarizationService:
                 min_new_tokens=safe_min,
                 no_repeat_ngram_size=3,
             )
-        return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        return tokenizer.decode(output_ids[0].detach().cpu(), skip_special_tokens=True)
 
 
 def split_summary_sentences(text: str) -> list[str]:

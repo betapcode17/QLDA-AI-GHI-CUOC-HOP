@@ -14,7 +14,7 @@ class ModelStatus(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
-    device: Literal["cpu"]
+    device: str
     models: list[ModelStatus]
 
 

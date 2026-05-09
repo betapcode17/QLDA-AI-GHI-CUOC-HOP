@@ -83,7 +83,7 @@ class DiarizationService:
                             self._pipeline = None
                             return self._pipeline
                 
-                pipeline.to(torch.device("cpu")) # type: ignore
+                pipeline.to(torch.device(settings.model_device)) # type: ignore
                 self._pipeline = pipeline
                 print("✅ Diarization pipeline loaded successfully!")
                 
