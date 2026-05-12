@@ -41,7 +41,7 @@ def configure_local_environment() -> None:
     
     # Model Paths - Support both project-local and custom paths
     os.environ.setdefault("STT_MODEL_DIR", r"C:\Users\ADMIN\PhoWhisper-medium")
-    os.environ.setdefault("DIARIZATION_MODEL_DIR", str(MODEL_ROOT / "diarization" / "speaker-diarization-community-1"))
+    os.environ.setdefault("DIARIZATION_MODEL_DIR", str(PROJECT_ROOT / "diarization" / "speaker-diarization-community-1"))
     os.environ.setdefault("TRANSLATION_VI_EN_DIR", r"C:\Users\ADMIN\opus-mt-vi-en")
     os.environ.setdefault("TRANSLATION_EN_VI_DIR", r"C:\Users\ADMIN\opus-mt-en-vi")
     os.environ.setdefault("SUMMARIZATION_MODEL_DIR", str(MODEL_ROOT / "summarization" / "bart-large-cnn"))
@@ -52,6 +52,7 @@ def configure_local_environment() -> None:
 
     # Runtime device preferences
     os.environ.setdefault("MODEL_DEVICE", "auto")
+    os.environ.setdefault("DIARIZATION_DEVICE", "cpu")
     os.environ.setdefault("STT_DEVICE", "cuda")
     os.environ.setdefault("STT_COMPUTE_TYPE", "auto")
     os.environ.setdefault("STT_CPU_THREADS", str(min(8, os.cpu_count() or 4)))
@@ -63,7 +64,7 @@ class Settings:
     
     # Model directories with environment variable support
     stt_model_dir: Path = Path(os.environ.get("STT_MODEL_DIR", r"C:\Users\ADMIN\PhoWhisper-medium"))
-    diarization_model_dir: Path = Path(os.environ.get("DIARIZATION_MODEL_DIR", str(MODEL_ROOT / "diarization" / "speaker-diarization-community-1")))
+    diarization_model_dir: Path = Path(os.environ.get("DIARIZATION_MODEL_DIR", str(PROJECT_ROOT / "diarization" / "speaker-diarization-community-1")))
     translation_vi_en_dir: Path = Path(os.environ.get("TRANSLATION_VI_EN_DIR", r"C:\Users\ADMIN\opus-mt-vi-en"))
     translation_en_vi_dir: Path = Path(os.environ.get("TRANSLATION_EN_VI_DIR", r"C:\Users\ADMIN\opus-mt-en-vi"))
     summarization_model_dir: Path = Path(os.environ.get("SUMMARIZATION_MODEL_DIR", str(MODEL_ROOT / "summarization" / "bart-large-cnn")))
@@ -115,6 +116,13 @@ class Settings:
         if preferred == "cpu":
             return "cpu"
         return "cuda" if torch.cuda.is_available() else "cpu"
+
+    @property
+    def diarization_device(self) -> str:
+        preferred = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
+        if preferred in {"cuda", "gpu"} and torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
 
     @property
     def is_gpu_enabled(self) -> bool:

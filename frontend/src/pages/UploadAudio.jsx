@@ -1,38 +1,47 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { uploadService } from '../services/api';
+import { useEffect, useMemo, useRef, useState } from "react";
+import { uploadService } from "../services/api";
 
 const displayLanguageLabels = {
-  en: 'English',
-  vi: 'Vietnamese',
+  en: "English",
+  vi: "Vietnamese",
 };
 
 const sourceLanguageLabels = {
-  en: 'English audio',
-  vi: 'Vietnamese audio',
+  en: "English audio",
+  vi: "Vietnamese audio",
 };
 
 const formatTime = (seconds) => {
   const totalSeconds = Math.max(0, Math.floor(seconds || 0));
-  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
-  const remainingSeconds = String(totalSeconds % 60).padStart(2, '0');
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+  const remainingSeconds = String(totalSeconds % 60).padStart(2, "0");
   return `${minutes}:${remainingSeconds}`;
 };
 
 const transcriptToEditorText = (segments = []) =>
   segments
-    .map((segment) => `[${formatTime(segment.start)}] ${segment.text}`.trim())
-    .join('\n');
+    .map((segment) => {
+      const time = formatTime(segment.start);
+      const prefix = segment.speaker
+        ? `[${segment.speaker} ${time}]`
+        : `[${time}]`;
+      return `${prefix} ${segment.text}`.trim();
+    })
+    .join("\n");
+
+const buildTranscriptText = (response) =>
+  response?.merged_text || transcriptToEditorText(response?.segments || []);
 
 const buildSummaryView = (llmResult) => {
   const result = llmResult?.result || {};
   return {
-    overview: result.summary || 'No AI summary yet.',
+    overview: result.summary || "No AI summary yet.",
     decisions: result.decisions || [],
     actionItems: (result.action_items || []).map((item) => {
-      const suffix = [item.assignee, item.deadline].filter(Boolean).join(' - ');
+      const suffix = [item.assignee, item.deadline].filter(Boolean).join(" - ");
       return suffix ? `${item.task} (${suffix})` : item.task;
     }),
-    minutes: result.meeting_minutes || '',
+    minutes: result.meeting_minutes || "",
     blockers: result.risks_or_blockers || [],
   };
 };
@@ -41,26 +50,27 @@ function UploadAudio() {
   const fileInputRef = useRef(null);
   const transcriptTextareaRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
-  const [audioPreviewUrl, setAudioPreviewUrl] = useState('');
-  const [sourceLanguage, setSourceLanguage] = useState('vi');
-  const [displayLanguage, setDisplayLanguage] = useState('vi');
+  const [audioPreviewUrl, setAudioPreviewUrl] = useState("");
+  const [sourceLanguage, setSourceLanguage] = useState("vi");
+  const [displayLanguage, setDisplayLanguage] = useState("vi");
   const [processing, setProcessing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [asking, setAsking] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
   const [transcription, setTranscription] = useState(null);
-  const [originalTranscriptText, setOriginalTranscriptText] = useState('');
-  const [editedTranscriptText, setEditedTranscriptText] = useState('');
+  const [originalTranscriptText, setOriginalTranscriptText] = useState("");
+  const [editedTranscriptText, setEditedTranscriptText] = useState("");
   const [translatedCache, setTranslatedCache] = useState({});
   const [llmResult, setLlmResult] = useState(null);
-  const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
 
   const canTranscribe = Boolean(selectedFile) && !processing;
-  const canTranslate = Boolean(editedTranscriptText.trim()) && !translating && !processing;
+  const canTranslate =
+    Boolean(editedTranscriptText.trim()) && !translating && !processing;
   const canAnalyze = Boolean(editedTranscriptText.trim()) && !analyzing;
   const canAsk = Boolean(question.trim()) && Boolean(llmResult) && !asking;
 
@@ -94,13 +104,13 @@ function UploadAudio() {
       return;
     }
 
-    transcriptTextareaRef.current.style.height = '0px';
+    transcriptTextareaRef.current.style.height = "0px";
     transcriptTextareaRef.current.style.height = `${transcriptTextareaRef.current.scrollHeight}px`;
   }, [editedTranscriptText]);
 
   const helperText = useMemo(() => {
     if (!selectedFile) {
-      return 'Choose an audio file to begin speech-to-text.';
+      return "Choose an audio file to begin speech-to-text.";
     }
 
     return `Selected: ${selectedFile.name}`;
@@ -115,17 +125,17 @@ function UploadAudio() {
 
   const resetAnalysisState = () => {
     setLlmResult(null);
-    setQuestion('');
-    setAnswer('');
+    setQuestion("");
+    setAnswer("");
   };
 
   const resetTranscriptState = () => {
     setTranscription(null);
-    setOriginalTranscriptText('');
-    setEditedTranscriptText('');
+    setOriginalTranscriptText("");
+    setEditedTranscriptText("");
     setTranslatedCache({});
     resetAnalysisState();
-    setError('');
+    setError("");
   };
 
   const handleFileChange = (event) => {
@@ -134,7 +144,7 @@ function UploadAudio() {
       URL.revokeObjectURL(audioPreviewUrl);
     }
     setSelectedFile(file);
-    setAudioPreviewUrl(file ? URL.createObjectURL(file) : '');
+    setAudioPreviewUrl(file ? URL.createObjectURL(file) : "");
     setDisplayLanguage(sourceLanguage);
     resetTranscriptState();
   };
@@ -145,11 +155,11 @@ function UploadAudio() {
     }
 
     setSelectedFile(null);
-    setAudioPreviewUrl('');
+    setAudioPreviewUrl("");
     resetTranscriptState();
 
     if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+      fileInputRef.current.value = "";
     }
   };
 
@@ -166,11 +176,19 @@ function UploadAudio() {
     }
 
     setProcessing(true);
-    setError('');
+    setError("");
+    setTranscription(null);
+    setOriginalTranscriptText("");
+    setEditedTranscriptText("");
+    setTranslatedCache({});
 
     try {
-      const response = await uploadService.transcribeAudio(selectedFile, sourceLanguage);
-      const editorText = transcriptToEditorText(response.segments);
+      const response = await uploadService.transcribeAudio(
+        selectedFile,
+        sourceLanguage,
+        true,
+      );
+      const editorText = buildTranscriptText(response);
       setTranscription(response);
       setOriginalTranscriptText(editorText);
       setEditedTranscriptText(editorText);
@@ -196,7 +214,10 @@ function UploadAudio() {
       return;
     }
 
-    if (translatedCache[nextLanguage] && editedTranscriptText === originalTranscriptText) {
+    if (
+      translatedCache[nextLanguage] &&
+      editedTranscriptText === originalTranscriptText
+    ) {
       setEditedTranscriptText(translatedCache[nextLanguage]);
       setDisplayLanguage(nextLanguage);
       resetAnalysisState();
@@ -204,11 +225,14 @@ function UploadAudio() {
     }
 
     setTranslating(true);
-    setError('');
+    setError("");
 
     try {
-      const direction = sourceLanguage === 'vi' ? 'vi-en' : 'en-vi';
-      const translated = await uploadService.translateText(editedTranscriptText, direction);
+      const direction = sourceLanguage === "vi" ? "vi-en" : "en-vi";
+      const translated = await uploadService.translateText(
+        editedTranscriptText,
+        direction,
+      );
 
       if (editedTranscriptText === originalTranscriptText) {
         setTranslatedCache((current) => ({
@@ -233,8 +257,8 @@ function UploadAudio() {
     }
 
     setAnalyzing(true);
-    setError('');
-    setAnswer('');
+    setError("");
+    setAnswer("");
 
     try {
       const result = await uploadService.runLlmAnalysis(editedTranscriptText);
@@ -254,7 +278,11 @@ function UploadAudio() {
 
     setAsking(true);
     try {
-              const result = uploadService.buildQuestionAnswer(question, llmResult, displayLanguage);
+      const result = uploadService.buildQuestionAnswer(
+        question,
+        llmResult,
+        displayLanguage,
+      );
       setAnswer(result);
     } finally {
       setAsking(false);
@@ -273,19 +301,24 @@ function UploadAudio() {
               Editable speech-to-text, on-demand translation, and LLM analysis
             </h2>
             <p className="mt-4 text-base leading-7 text-slate-300">
-              Your audio file is transcribed with PhoWhisper first. After that, you can edit the
-              transcript, translate it on demand, and run LLM-based summary and Q&A on the revised text.
+              Your audio file is transcribed with PhoWhisper first. After that,
+              you can edit the transcript, translate it on demand, and run
+              LLM-based summary and Q&A on the revised text.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-2xl bg-white/5 px-4 py-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Backend</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">
+                Backend
+              </p>
               <p className="mt-2 text-sm font-semibold text-white">
-                {health?.status === 'ok' ? 'Connected' : 'Unavailable'}
+                {health?.status === "ok" ? "Connected" : "Unavailable"}
               </p>
             </div>
             <div className="rounded-2xl bg-white/5 px-4 py-4">
-              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Models ready</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">
+                Models ready
+              </p>
               <p className="mt-2 text-sm font-semibold text-white">
                 {availableModels}/{models.length}
               </p>
@@ -298,11 +331,15 @@ function UploadAudio() {
         <p className="text-sm font-semibold uppercase tracking-[0.2em] text-accent-300">
           Upload file
         </p>
-        <h3 className="mt-2 text-xl font-bold text-white">Choose an input audio file</h3>
+        <h3 className="mt-2 text-xl font-bold text-white">
+          Choose an input audio file
+        </h3>
 
         <div className="mt-6 grid gap-4 md:grid-cols-2">
           <label className="space-y-2">
-            <span className="text-sm font-semibold text-slate-100">Source audio language</span>
+            <span className="text-sm font-semibold text-slate-100">
+              Source audio language
+            </span>
             <select
               value={sourceLanguage}
               onChange={handleSourceLanguageChange}
@@ -314,7 +351,9 @@ function UploadAudio() {
           </label>
 
           <div className="space-y-2">
-            <span className="text-sm font-semibold text-slate-100">Display language</span>
+            <span className="text-sm font-semibold text-slate-100">
+              Display language
+            </span>
             <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
               {displayLanguageLabels[displayLanguage]}
             </div>
@@ -325,7 +364,9 @@ function UploadAudio() {
           <div className="mt-6 rounded-[28px] border border-white/10 bg-white/5 p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
-                <p className="text-lg font-semibold text-white">{selectedFile.name}</p>
+                <p className="text-lg font-semibold text-white">
+                  {selectedFile.name}
+                </p>
                 <p className="mt-2 text-sm text-slate-400">
                   {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
                 </p>
@@ -342,7 +383,9 @@ function UploadAudio() {
           </div>
         ) : (
           <label className="mt-6 flex cursor-pointer flex-col items-center justify-center rounded-[28px] border border-dashed border-white/15 bg-white/5 px-6 py-12 text-center transition hover:border-accent-400 hover:bg-white/10">
-            <span className="text-lg font-semibold text-white">Drag and drop or click to choose a file</span>
+            <span className="text-lg font-semibold text-white">
+              Drag and drop or click to choose a file
+            </span>
             <span className="mt-2 text-sm text-slate-400">
               Supports mp3, wav, m4a, and other common audio formats
             </span>
@@ -359,6 +402,19 @@ function UploadAudio() {
         <div className="mt-5 rounded-2xl bg-white/5 px-4 py-4">
           <p className="text-sm font-semibold text-white">Status</p>
           <p className="mt-2 text-sm text-slate-300">{helperText}</p>
+          <p className="mt-2 text-sm text-slate-300">
+            Speaker labels:{" "}
+            {transcription
+              ? `${transcription.num_speakers ?? 0} detected`
+              : "on"}
+          </p>
+          {transcription?.warnings?.length ? (
+            <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+              {transcription.warnings.map((warning, index) => (
+                <p key={`${warning}-${index}`}>{warning}</p>
+              ))}
+            </div>
+          ) : null}
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
             Display language: {displayLanguageLabels[displayLanguage]}
           </p>
@@ -370,7 +426,7 @@ function UploadAudio() {
           disabled={!canTranscribe}
           className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-accent-500 px-6 py-3 text-sm font-semibold text-white transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
         >
-          {processing ? 'Transcribing...' : 'Generate transcript'}
+          {processing ? "Transcribing..." : "Generate transcript"}
         </button>
 
         {error && (
@@ -387,41 +443,51 @@ function UploadAudio() {
               <p className="text-sm font-semibold uppercase tracking-[0.2em] text-accent-300">
                 Transcript
               </p>
-              <h2 className="mt-2 text-xl font-bold text-white">Meeting transcript</h2>
+              <h2 className="mt-2 text-xl font-bold text-white">
+                Meeting transcript
+              </h2>
             </div>
             <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">
-              {editedTranscriptText ? editedTranscriptText.split('\n').filter(Boolean).length : 0} entries
+              {editedTranscriptText
+                ? editedTranscriptText.split("\n").filter(Boolean).length
+                : 0}{" "}
+              entries
             </span>
           </div>
 
           <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
             <p className="text-sm text-slate-400">
-              This transcript is fully editable. Use the language buttons to request translation.
+              This transcript is fully editable. Use the language buttons to
+              request translation.
             </p>
             <div className="flex gap-3">
               <button
                 type="button"
-                onClick={() => handleTranslate('vi')}
+                onClick={() => handleTranslate("vi")}
                 disabled={!canTranslate}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  displayLanguage === 'vi'
-                    ? 'bg-accent-500 text-white'
-                    : 'border border-white/10 bg-white/5 text-slate-300 hover:border-accent-300 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500'
+                  displayLanguage === "vi"
+                    ? "bg-accent-500 text-white"
+                    : "border border-white/10 bg-white/5 text-slate-300 hover:border-accent-300 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500"
                 }`}
               >
-                {translating && displayLanguage !== 'vi' ? 'Translating...' : 'Vietnamese'}
+                {translating && displayLanguage !== "vi"
+                  ? "Translating..."
+                  : "Vietnamese"}
               </button>
               <button
                 type="button"
-                onClick={() => handleTranslate('en')}
+                onClick={() => handleTranslate("en")}
                 disabled={!canTranslate}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  displayLanguage === 'en'
-                    ? 'bg-accent-500 text-white'
-                    : 'border border-white/10 bg-white/5 text-slate-300 hover:border-accent-300 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500'
+                  displayLanguage === "en"
+                    ? "bg-accent-500 text-white"
+                    : "border border-white/10 bg-white/5 text-slate-300 hover:border-accent-300 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-slate-500"
                 }`}
               >
-                {translating && displayLanguage !== 'en' ? 'Translating...' : 'English'}
+                {translating && displayLanguage !== "en"
+                  ? "Translating..."
+                  : "English"}
               </button>
             </div>
           </div>
@@ -451,17 +517,21 @@ function UploadAudio() {
               disabled={!canAnalyze}
               className="rounded-full bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
             >
-              {analyzing ? 'Analyzing...' : 'Run LLM analysis'}
+              {analyzing ? "Analyzing..." : "Run LLM analysis"}
             </button>
           </div>
 
           <div className="mt-6 space-y-6">
             <div className="rounded-2xl bg-white/5 p-4">
-              <p className="text-sm leading-7 text-slate-300">{summaryView.overview}</p>
+              <p className="text-sm leading-7 text-slate-300">
+                {summaryView.overview}
+              </p>
             </div>
 
             <div>
-              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Decisions</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Decisions
+              </h3>
               <div className="mt-3 space-y-3">
                 {summaryView.decisions.length ? (
                   summaryView.decisions.map((item) => (
@@ -481,7 +551,9 @@ function UploadAudio() {
             </div>
 
             <div>
-              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Action items</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Action items
+              </h3>
               <div className="mt-3 space-y-3">
                 {summaryView.actionItems.length ? (
                   summaryView.actionItems.map((item) => (
@@ -501,7 +573,9 @@ function UploadAudio() {
             </div>
 
             <div>
-              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Q&A</h3>
+              <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">
+                Q&A
+              </h3>
               <form onSubmit={handleAsk} className="mt-3 space-y-4">
                 <textarea
                   value={question}
@@ -515,21 +589,26 @@ function UploadAudio() {
                   disabled={!canAsk}
                   className="rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                 >
-                  {asking ? 'Answering...' : 'Ask question'}
+                  {asking ? "Answering..." : "Ask question"}
                 </button>
               </form>
 
               <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Answer</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Answer
+                </p>
                 <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-slate-300">
-                  {answer || 'The answer will appear here after you run the LLM analysis and ask a question.'}
+                  {answer ||
+                    "The answer will appear here after you run the LLM analysis and ask a question."}
                 </pre>
               </div>
             </div>
 
             {summaryView.minutes ? (
               <div>
-                <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Meeting minutes</h3>
+                <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Meeting minutes
+                </h3>
                 <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-4 text-sm leading-7 text-slate-300">
                   {summaryView.minutes}
                 </div>
@@ -538,7 +617,9 @@ function UploadAudio() {
 
             {summaryView.blockers.length ? (
               <div>
-                <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">Risks / Blockers</h3>
+                <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Risks / Blockers
+                </h3>
                 <div className="mt-3 space-y-3">
                   {summaryView.blockers.map((item) => (
                     <div

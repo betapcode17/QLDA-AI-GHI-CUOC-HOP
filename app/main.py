@@ -145,6 +145,38 @@ async def save_uploaded_audio(file: UploadFile) -> str:
     return str(save_upload_bytes(data, file.filename or "audio"))
 
 
+async def transcribe_audio_core(
+    file: UploadFile,
+    language: str,
+    include_speakers: bool = False,
+) -> tuple[TranscriptionResponse, DiarizationResponse | None, int, list[str]]:
+    warnings: list[str] = []
+    uploaded_path = await save_uploaded_audio(file)
+    normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
+    transcript = await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+
+    diarization: DiarizationResponse | None = None
+    num_speakers = 0
+    if include_speakers:
+        try:
+            diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
+            transcript = transcript.model_copy(
+                update={"segments": attach_speakers(transcript.segments, diarization.segments)}
+            )
+            num_speakers = len({segment.speaker for segment in transcript.segments if segment.speaker})
+            if num_speakers <= 1:
+                warnings.append(
+                    "Khong tach duoc nhieu nguoi noi: diarization chi phat hien mot speaker."
+                    if num_speakers == 1
+                    else "Khong tach duoc nhieu nguoi noi: diarization khong phat hien speaker ro rang."
+                )
+        except Exception as exc:
+            warnings.append(f"Diarization failed: {exc}")
+            num_speakers = 0
+
+    return transcript, diarization, num_speakers, warnings
+
+
 def to_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
@@ -210,14 +242,25 @@ def models_status():
 async def transcribe_audio(
     file: Annotated[UploadFile, File(...)],
     language: Annotated[str, Query(description="Language hint for faster-whisper.")] = "vi",
+    include_speakers: Annotated[
+        bool,
+        Query(description="Attach diarization speaker labels to each transcript segment."),
+    ] = False,
 ) -> TranscriptionResponse:
     try:
         print(f"[API][DEBUG] /api/transcribe requested: file={file.filename}, language={language}")
         print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
         print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
-        uploaded_path = await save_uploaded_audio(file)
-        normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
-        return await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, include_speakers)
+        if include_speakers:
+            return transcript.model_copy(
+                update={
+                    "num_speakers": num_speakers,
+                    "diarization": diarization,
+                    "warnings": warnings,
+                }
+            )
+        return transcript
     except HTTPException:
         raise
     except Exception as exc:
@@ -244,37 +287,10 @@ async def transcribe_with_speakers(
         print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
         print(f"{'='*80}")
         
-        uploaded_path = await save_uploaded_audio(file)
-        print(f"[API] Audio uploaded to: {uploaded_path}")
-        
-        normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
-        print(f"[API] Audio normalized")
-        
-        # Transcribe
-        print(f"\n[API] STEP 1: Speech-to-Text (STT)")
-        transcript = await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, True)
         print(f"[API] STT completed - {len(transcript.text)} chars")
-        warnings: list[str] = []
-        num_speakers = 1
-        
-        # Diarize (speaker identification)
-        print(f"\n[API] STEP 2: Speaker Detection (Diarization)")
-        try:
-            diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
-            transcript_with_speakers = transcript.model_copy(
-                update={"segments": attach_speakers(transcript.segments, diarization.segments)}
-            )
-            # Count unique speakers
-            unique_speakers = set(seg.speaker for seg in transcript_with_speakers.segments if seg.speaker)
-            num_speakers = len(unique_speakers)
-            print(f"[API] Diarization detected {num_speakers} speakers")
-        except Exception as e:
-            print(f"[API] Diarization error: {e}")
-            transcript_with_speakers = transcript
-            warnings.append(f"Diarization failed: {str(e)}")
-            num_speakers = 1
-        
-        # Format merged text with speakers
+        transcript_with_speakers = transcript
+
         print(f"\n[API] STEP 3: Formatting output")
         merged_text = format_merged_transcript(transcript_with_speakers.segments)
         

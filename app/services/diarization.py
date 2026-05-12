@@ -31,61 +31,47 @@ class DiarizationService:
                     module="pyannote.audio.core.io",
                 )
                 from pyannote.audio import Pipeline
+                try:
+                    from torch.serialization import add_safe_globals, safe_globals
+                    from pyannote.audio.core.task import Specifications
 
-                print("📥 Loading Pyannote speaker-diarization from HuggingFace...")
-                
-                # Get token from environment
-                hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
-                
-                if not hf_token:
-                    print("   ⚠️  WARNING: HF_TOKEN not set!")
-                    print("   Using fallback: Diarization will be skipped")
-                    print("   To enable: set HF_TOKEN environment variable")
-                    print("   Get token: https://huggingface.co/settings/tokens")
+                    add_safe_globals([Specifications])
+                except Exception:
+                    pass
+
+                local_model_dir = Path(settings.diarization_model_dir)
+                if not local_model_dir.exists():
+                    print(f"   [WARN] Local diarization bundle not found: {local_model_dir}")
+                    self._pipeline = None
+                    return self._pipeline
+
+                print(f"[DIARIZATION] Loading Pyannote speaker-diarization from local bundle: {local_model_dir}")
+
+                try:
+                    original_torch_load = torch.load
+
+                    def _torch_load_compat(*args, **kwargs):
+                        if kwargs.get("weights_only") is None:
+                            kwargs["weights_only"] = False
+                        return original_torch_load(*args, **kwargs)
+
+                    torch.load = _torch_load_compat  # type: ignore[assignment]
+                    try:
+                        with safe_globals([Specifications]):
+                            pipeline = Pipeline.from_pretrained(str(local_model_dir))
+                    finally:
+                        torch.load = original_torch_load  # type: ignore[assignment]
+                    print("   [OK] Loaded local speaker-diarization bundle")
+                except Exception as local_error:
+                    print(f"   [WARN] Local diarization load failed: {type(local_error).__name__}")
+                    print(f"   Error: {local_error}")
+                    print("   [WARN] Diarization disabled - server will skip speaker detection")
                     self._pipeline = None
                     return self._pipeline
                 
-                # Try loading with token (use 'token' parameter, not 'use_auth_token')
-                try:
-                    print("   Using HuggingFace token...")
-                    pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization-3.1",
-                        token=hf_token
-                    )
-                    print("   ✅ Using speaker-diarization-3.1")
-                except Exception as e1:
-                    print(f"   ⚠️  3.1 failed: {type(e1).__name__}")
-                    
-                    # Fallback to 2.1 with @2022-12-19
-                    try:
-                        print("   Trying speaker-diarization 2.1...")
-                        pipeline = Pipeline.from_pretrained(
-                            "pyannote/speaker-diarization@2022-12-19",
-                            token=hf_token,
-                        )
-                        print("   ✅ Using speaker-diarization 2.1")
-                    except Exception as e2:
-                        print(f"   ⚠️  2.1 failed: {type(e2).__name__}")
-                        
-                        # Last resort: use revision parameter
-                        try:
-                            print("   Trying speaker-diarization with revision...")
-                            pipeline = Pipeline.from_pretrained(
-                                "pyannote/speaker-diarization",
-                                revision="2022-12-19",
-                                token=hf_token,
-                            )
-                            print("   ✅ Using speaker-diarization (revision 2022-12-19)")
-                        except Exception as e3:
-                            print(f"   ⚠️  All fallbacks failed: {type(e3).__name__}")
-                            print(f"   Error: {e3}")
-                            print("   ⚠️  FALLBACK: Diarization disabled - server will skip speaker detection")
-                            self._pipeline = None
-                            return self._pipeline
-                
-                pipeline.to(torch.device(settings.model_device)) # type: ignore
+                pipeline.to(torch.device(settings.diarization_device)) # type: ignore
                 self._pipeline = pipeline
-                print("✅ Diarization pipeline loaded successfully!")
+                print(f"[DIARIZATION] Pipeline loaded successfully on {settings.diarization_device}")
                 
         return self._pipeline
 
@@ -115,7 +101,7 @@ class DiarizationService:
         # Use real diarization model
         try:
             print(f"[DIARIZATION] Running Pyannote inference...")
-            diarization_output = pipeline(str(audio_path)) # type: ignore
+            diarization_output = pipeline(read_waveform_for_pyannote(audio_path)) # type: ignore
             diarization = extract_annotation(diarization_output)
             segments = [
                 DiarizationSegment(

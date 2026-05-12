@@ -37,6 +37,9 @@ class TranscriptionResponse(BaseModel):
     language_probability: float | None = None
     segments: list[TranscriptSegment]
     text: str
+    num_speakers: int | None = None
+    diarization: DiarizationResponse | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DiarizationResponse(BaseModel):
