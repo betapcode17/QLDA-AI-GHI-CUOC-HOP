@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -8,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+import torch
 
 from app.config import PROJECT_ROOT, settings
 from app.schemas import (
@@ -16,20 +19,34 @@ from app.schemas import (
     LLMHealthResponse,
     LLMTestRequest,
     ProcessResponse,
+    STTHealthResponse,
     SummaryRequest,
     SummaryResponse,
+    TranscribeWithSpeakersResponse,
     TranslateRequest,
     TranslateResponse,
     TranscriptionResponse,
 )
 from app.services.audio import normalize_audio, save_upload_bytes
-from app.services.diarization import diarization_service
+from app.services.diarization import attach_speakers, diarization_service
 from app.services.llm_service import llm_service
 from app.services.model_status import get_model_statuses
-from app.services.pipeline import process_meeting_audio
+from app.services.pipeline import format_merged_transcript, process_meeting_audio
 from app.services.stt import stt_service
 from app.services.summarization import summarization_service
 from app.services.translation import translation_service
+
+
+def configure_console_encoding() -> None:
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace") # type: ignore
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")# type: ignore
+    except Exception:
+        pass
+
+
+configure_console_encoding()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -44,11 +61,120 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "app" / "static"), name="static")
 
 
+# ============================================================================
+# STARTUP: Preload all models into memory
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_preload_models():
+    """Preload all models at startup for faster inference."""
+    print("\n" + "=" * 80)
+    print("🚀 STARTUP: Preloading models into RAM...")
+    print(f"[STARTUP][DEBUG] torch.cuda.is_available(): {torch.cuda.is_available()}")
+    print(f"[STARTUP][DEBUG] torch.version.cuda: {getattr(getattr(torch, 'version', None), 'cuda', None)}")
+    print(f"[STARTUP][DEBUG] torch build: {torch.__version__}")
+    print(f"[STARTUP][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+    print(f"[STARTUP][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+    if not torch.cuda.is_available():
+        print("[STARTUP][WARN] PyTorch is CPU-only or CUDA is unavailable. STT will run on CPU.")
+    print("=" * 80)
+    
+    try:
+        # 1. Preload STT (PhoWhisper)
+        print("\n [1/5] Loading Speech-to-Text (PhoWhisper)...")
+        await run_in_threadpool(stt_service._load)
+        print("       ✅ STT model loaded successfully!")
+        
+    except Exception as e:
+        print(f"       ❌ STT Error: {e}")
+    
+    try:
+        # 2. Preload LLM (Ollama Qwen)
+        print("\n🤖 [2/5] Loading LLM (Ollama Qwen2.5)...")
+        result = await run_in_threadpool(llm_service.smoke_test)
+        if result.error:
+            print(f"       ⚠️  LLM Warning: {result.error}")
+        else:
+            print("       ✅ LLM (Ollama) ready!")
+            
+    except Exception as e:
+        print(f"       ⚠️  LLM Error: {e}")
+    
+    try:
+        # 3. Preload Translator (vi-en)
+        print("\n🔄 [3/5] Loading Translation Models...")
+        await run_in_threadpool(translation_service._load, "vi-en")
+        print("       ✅ Translation VI→EN loaded!")
+        
+        await run_in_threadpool(translation_service._load, "en-vi")
+        print("       ✅ Translation EN→VI loaded!")
+        
+    except Exception as e:
+        print(f"       ❌ Translation Error: {e}")
+    
+    try:
+        # 4. Preload Diarization (Speaker detection)
+        print("\n👥 [4/5] Loading Diarization (Speaker Detection)...")
+        await run_in_threadpool(diarization_service._load)
+        print("       ✅ Diarization model loaded!")
+        
+    except Exception as e:
+        print(f"       ⚠️  Diarization Error: {e}")
+    
+    try:
+        # 5. Preload Summarization
+        print("\n📝 [5/5] Loading Summarization Model...")
+        await run_in_threadpool(summarization_service._load)
+        print("       ✅ Summarization model loaded!")
+        
+    except Exception as e:
+        print(f"       ⚠️  Summarization Error: {e}")
+    
+    print("\n" + "=" * 80)
+    print("✨ All models preloaded in RAM. API ready for inference!")
+    print("=" * 80 + "\n")
+
+
+# ============================================================================
+
+
 async def save_uploaded_audio(file: UploadFile) -> str:
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     return str(save_upload_bytes(data, file.filename or "audio"))
+
+
+async def transcribe_audio_core(
+    file: UploadFile,
+    language: str,
+    include_speakers: bool = False,
+) -> tuple[TranscriptionResponse, DiarizationResponse | None, int, list[str]]:
+    warnings: list[str] = []
+    uploaded_path = await save_uploaded_audio(file)
+    normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
+    transcript = await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+
+    diarization: DiarizationResponse | None = None
+    num_speakers = 0
+    if include_speakers:
+        try:
+            diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
+            transcript = transcript.model_copy(
+                update={"segments": attach_speakers(transcript.segments, diarization.segments)}
+            )
+            num_speakers = len({segment.speaker for segment in transcript.segments if segment.speaker})
+            if num_speakers <= 1:
+                warnings.append(
+                    "Khong tach duoc nhieu nguoi noi: diarization chi phat hien mot speaker."
+                    if num_speakers == 1
+                    else "Khong tach duoc nhieu nguoi noi: diarization khong phat hien speaker ro rang."
+                )
+        except Exception as exc:
+            warnings.append(f"Diarization failed: {exc}")
+            num_speakers = 0
+
+    return transcript, diarization, num_speakers, warnings
 
 
 def to_http_error(exc: Exception) -> HTTPException:
@@ -67,7 +193,7 @@ def favicon() -> FileResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", device="cpu", models=get_model_statuses())
+    return HealthResponse(status="ok", device=settings.model_device, models=get_model_statuses())
 
 
 @app.get("/health/llm", response_model=LLMHealthResponse)
@@ -79,6 +205,19 @@ async def llm_health() -> LLMHealthResponse:
         base_url=llm_service.config.base_url,
         result=result,
         error=result.error,
+    )
+
+
+@app.get("/health/stt", response_model=STTHealthResponse)
+async def stt_health() -> STTHealthResponse:
+    ok, error, language, sample_text = await run_in_threadpool(stt_service.smoke_test)
+    return STTHealthResponse(
+        ok=ok,
+        model_path=str(settings.stt_model_dir),
+        compute_type=settings.stt_compute_type,
+        language_detected=language,
+        sample_text_transcribed=sample_text,
+        error=error,
     )
 
 
@@ -103,14 +242,76 @@ def models_status():
 async def transcribe_audio(
     file: Annotated[UploadFile, File(...)],
     language: Annotated[str, Query(description="Language hint for faster-whisper.")] = "vi",
+    include_speakers: Annotated[
+        bool,
+        Query(description="Attach diarization speaker labels to each transcript segment."),
+    ] = False,
 ) -> TranscriptionResponse:
     try:
-        uploaded_path = await save_uploaded_audio(file)
-        normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
-        return await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+        print(f"[API][DEBUG] /api/transcribe requested: file={file.filename}, language={language}")
+        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, include_speakers)
+        if include_speakers:
+            return transcript.model_copy(
+                update={
+                    "num_speakers": num_speakers,
+                    "diarization": diarization,
+                    "warnings": warnings,
+                }
+            )
+        return transcript
     except HTTPException:
         raise
     except Exception as exc:
+        import traceback
+        print(f"[API][ERROR] Transcription failed: {exc}")
+        print(traceback.format_exc())
+        raise to_http_error(exc) from exc
+
+
+@app.post("/api/transcribe-with-speakers", response_model=TranscribeWithSpeakersResponse)
+async def transcribe_with_speakers(
+    file: Annotated[UploadFile, File(...)],
+    language: Annotated[str, Query(description="Language hint for faster-whisper.")] = "vi",
+) -> TranscribeWithSpeakersResponse:
+    """Transcribe audio with speaker identification (diarization).
+    
+    If 2 or more speakers detected, output shows: SPEAKER_00: text, SPEAKER_01: text, etc.
+    """
+    try:
+        print(f"\n{'='*80}")
+        print(f"[API] /api/transcribe-with-speakers request")
+        print(f"[API] File: {file.filename}, Language: {language}")
+        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+        print(f"{'='*80}")
+        
+        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, True)
+        print(f"[API] STT completed - {len(transcript.text)} chars")
+        transcript_with_speakers = transcript
+
+        print(f"\n[API] STEP 3: Formatting output")
+        merged_text = format_merged_transcript(transcript_with_speakers.segments)
+        
+        print(f"\n[API] FINAL OUTPUT:")
+        print(f"  Speakers: {num_speakers}")
+        print(f"  Segments: {len(transcript_with_speakers.segments)}")
+        print(f"  Text length: {len(merged_text)} chars")
+        print(f"{'='*80}\n")
+        
+        return TranscribeWithSpeakersResponse(
+            language=transcript.language,
+            language_probability=transcript.language_probability,
+            num_speakers=num_speakers,
+            segments=transcript_with_speakers.segments,
+            merged_text=merged_text,
+            warnings=warnings,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[API] ERROR: {exc}")
         raise to_http_error(exc) from exc
 
 

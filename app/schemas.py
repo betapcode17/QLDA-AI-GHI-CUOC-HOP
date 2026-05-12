@@ -14,7 +14,7 @@ class ModelStatus(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
-    device: Literal["cpu"]
+    device: str
     models: list[ModelStatus]
 
 
@@ -37,10 +37,23 @@ class TranscriptionResponse(BaseModel):
     language_probability: float | None = None
     segments: list[TranscriptSegment]
     text: str
+    num_speakers: int | None = None
+    diarization: DiarizationResponse | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DiarizationResponse(BaseModel):
     segments: list[DiarizationSegment]
+
+
+class TranscribeWithSpeakersResponse(BaseModel):
+    """Transcription with speaker identification"""
+    language: str | None = None
+    language_probability: float | None = None
+    num_speakers: int
+    segments: list[TranscriptSegment]
+    merged_text: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TranslateRequest(BaseModel):
@@ -92,6 +105,15 @@ class LLMHealthResponse(BaseModel):
     model: str
     base_url: str
     result: LLMRefinement | None = None
+    error: str | None = None
+
+
+class STTHealthResponse(BaseModel):
+    ok: bool
+    model_path: str
+    compute_type: str
+    language_detected: str | None = None
+    sample_text_transcribed: str | None = None
     error: str | None = None
 
 

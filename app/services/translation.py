@@ -4,6 +4,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Literal
 import warnings
+import torch
 
 from app.config import settings
 
@@ -25,7 +26,7 @@ class TranslationService:
 
         with self._lock:
             if direction not in self._models:
-                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer # type: ignore
 
                 model_dir = self._model_dir(direction)
                 if not (model_dir / "config.json").exists():
@@ -41,19 +42,18 @@ class TranslationService:
                 model.generation_config.max_length = None
                 if hasattr(model.config, "max_length"):
                     model.config.max_length = None
-                model.to("cpu")
+                model.to(settings.model_device)
                 model.eval()
                 self._models[direction] = (tokenizer, model)
         return self._models[direction]
 
     def translate(self, text: str, direction: Direction, max_new_tokens: int = 256) -> str:
-        import torch
-
         tokenizer, model = self._load(direction)
-        inputs = tokenizer(text, return_tensors="pt", truncation=True)
+        inputs = tokenizer(text, return_tensors="pt", truncation=True) # type: ignore
+        inputs = {key: value.to(settings.model_device) for key, value in inputs.items()}
         with torch.no_grad():
-            output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
-        return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+            output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens) # type: ignore
+        return tokenizer.decode(output_ids[0].detach().cpu(), skip_special_tokens=True) # type: ignore
 
 
 translation_service = TranslationService()
