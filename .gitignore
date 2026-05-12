@@ -15,4 +15,6 @@ models/
 .env    
 
 frontend/node_modules/
+diarization/
+frontend/dist/
 
