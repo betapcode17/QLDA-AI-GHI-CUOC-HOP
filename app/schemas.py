@@ -46,10 +46,35 @@ class DiarizationResponse(BaseModel):
     segments: list[DiarizationSegment]
 
 
+class AnnotationSegment(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    speaker: str = Field(min_length=1)
+
+
+class AnnotationDocument(BaseModel):
+    uri: str
+    audio: str
+    duration: float = Field(ge=0)
+    sample_rate: int = Field(gt=0)
+    speakers: list[str] = Field(default_factory=lambda: ["SPEAKER_00", "SPEAKER_01"])
+    segments: list[AnnotationSegment] = Field(default_factory=list)
+
+
+class AnnotationAudioItem(BaseModel):
+    uri: str
+    audio: str
+    duration: float
+    annotated: bool = False
+    segments: int = 0
+
+
 class TranscribeWithSpeakersResponse(BaseModel):
     """Transcription with speaker identification"""
     language: str | None = None
     language_probability: float | None = None
+    detected_speakers: int = 0
+    assigned_speakers: int = 0
     num_speakers: int
     segments: list[TranscriptSegment]
     merged_text: str

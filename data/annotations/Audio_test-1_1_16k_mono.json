@@ -1,0 +1,11 @@
+{
+  "uri": "Audio_test-1_1_16k_mono",
+  "audio": "data\\eval\\audio\\Audio_test-1_1_16k_mono.wav",
+  "duration": 23.174,
+  "sample_rate": 16000,
+  "speakers": [
+    "SPEAKER_00",
+    "SPEAKER_01"
+  ],
+  "segments": []
+}

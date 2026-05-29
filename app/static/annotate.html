@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RTTM Annotator</title>
+    <link rel="stylesheet" href="/static/annotate.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Manual diarization workflow</p>
+          <h1>RTTM Annotator</h1>
+          <p class="lede">
+            Chọn speaker, kéo trên timeline, rồi lưu JSON hoặc xuất RTTM để
+            benchmark lại.
+          </p>
+        </div>
+        <div class="actions">
+          <a class="ghost-link" href="/">Back to meeting app</a>
+          <button id="exportAllBtn" class="primary-btn" type="button">
+            Export all RTTM
+          </button>
+        </div>
+      </header>
+
+      <section class="layout">
+        <aside class="sidebar">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Audio queue</p>
+              <h2>Files</h2>
+            </div>
+            <button id="reloadBtn" class="ghost-btn" type="button">
+              Reload
+            </button>
+          </div>
+          <div id="fileList" class="file-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="workspace">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Current file</p>
+              <h2 id="currentTitle">Select an audio file</h2>
+            </div>
+            <div id="statusPill" class="status-pill">Ready</div>
+          </div>
+
+          <div class="toolbar">
+            <audio id="audioPlayer" controls></audio>
+            <div class="speaker-tools">
+              <div class="speaker-label">Speaker</div>
+              <div id="speakerButtons" class="speaker-buttons"></div>
+              <button id="addSpeakerBtn" class="ghost-btn" type="button">
+                + Speaker
+              </button>
+            </div>
+          </div>
+
+          <div class="timeline-card">
+            <div class="timeline-head">
+              <div>
+                <p class="eyebrow">Timeline</p>
+                <div id="selectionText" class="selection-text">
+                  Drag to create a segment.
+                </div>
+              </div>
+              <div class="timeline-meta">
+                <span id="durationText">00:00</span>
+                <span id="cursorText">00:00</span>
+              </div>
+            </div>
+            <div class="timeline-stage">
+              <canvas id="timelineCanvas" width="1800" height="360"></canvas>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Segments</p>
+                  <h2>Editable labels</h2>
+                </div>
+                <button id="saveBtn" class="primary-btn" type="button">
+                  Save JSON
+                </button>
+              </div>
+              <div id="segmentList" class="segment-list"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Export</p>
+                  <h2>Benchmark output</h2>
+                </div>
+                <button id="exportBtn" class="primary-btn" type="button">
+                  Export RTTM
+                </button>
+              </div>
+              <div class="note-box">
+                <p>Workflow:</p>
+                <ol>
+                  <li>Chọn file audio.</li>
+                  <li>Chọn speaker.</li>
+                  <li>Kéo trên timeline để tạo segment.</li>
+                  <li>Lưu JSON và export RTTM.</li>
+                </ol>
+              </div>
+              <div class="note-box subtle" id="jsonPreview">
+                No annotation loaded.
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/annotate.js" defer></script>
+  </body>
+</html>

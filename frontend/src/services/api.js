@@ -146,6 +146,23 @@ export const uploadService = {
     }
   },
 
+  async detectSpeakers(file) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await api.post("/api/diarize", formData, {
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error, "Detect speaker that bai."));
+    }
+  },
+
   async translateText(text, direction, maxNewTokens = 512) {
     try {
       const response = await api.post("/api/translate", {

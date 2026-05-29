@@ -13,9 +13,22 @@
           <p class="eyebrow">Local CPU Workspace</p>
           <h1>AI ghi biên bản và tổng hợp cuộc họp</h1>
         </div>
-        <div class="system-strip" id="modelStatus" aria-live="polite">
-          <span class="dot pending"></span>
-          <span>Checking models</span>
+        <div
+          style="
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+          "
+        >
+          <a class="ghost-button" href="/annotate" style="text-decoration: none"
+            >Open RTTM annotator</a
+          >
+          <div class="system-strip" id="modelStatus" aria-live="polite">
+            <span class="dot pending"></span>
+            <span>Checking models</span>
+          </div>
         </div>
       </header>
 
@@ -30,25 +43,55 @@
           </div>
 
           <div class="wave-stage">
-            <canvas id="waveform" width="1200" height="360" aria-label="Audio waveform"></canvas>
+            <canvas
+              id="waveform"
+              width="1200"
+              height="360"
+              aria-label="Audio waveform"
+            ></canvas>
             <div class="record-state" id="recordState">Ready</div>
           </div>
 
           <div class="controls" aria-label="Recording controls">
-            <button class="icon-button primary" id="recordBtn" type="button" title="Record">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"></circle></svg>
+            <button
+              class="icon-button primary"
+              id="recordBtn"
+              type="button"
+              title="Record"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="6"></circle>
+              </svg>
               <span>Record</span>
             </button>
-            <button class="icon-button" id="stopBtn" type="button" title="Stop" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>
+            <button
+              class="icon-button"
+              id="stopBtn"
+              type="button"
+              title="Stop"
+              disabled
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="7" y="7" width="10" height="10" rx="1"></rect>
+              </svg>
               <span>Stop</span>
             </button>
-            <button class="icon-button" id="processBtn" type="button" title="Process" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
+            <button
+              class="icon-button"
+              id="processBtn"
+              type="button"
+              title="Process"
+              disabled
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5v14l11-7z"></path>
+              </svg>
               <span>Process</span>
             </button>
             <label class="file-button" title="Import audio">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4 4m-4-4-4 4M5 17v3h14v-3"></path></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12m0-12 4 4m-4-4-4 4M5 17v3h14v-3"></path>
+              </svg>
               <span>Import</span>
               <input id="fileInput" type="file" accept="audio/*,video/*" />
             </label>
@@ -95,8 +138,16 @@
           <div class="result-section summary-section">
             <div class="section-head">
               <p class="eyebrow">Minutes</p>
-              <button class="ghost-button" id="copyBtn" type="button" title="Copy result" disabled>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h10v12H8zM6 16H4V4h12v2"></path></svg>
+              <button
+                class="ghost-button"
+                id="copyBtn"
+                type="button"
+                title="Copy result"
+                disabled
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 8h10v12H8zM6 16H4V4h12v2"></path>
+                </svg>
                 <span>Copy</span>
               </button>
             </div>
@@ -108,17 +159,23 @@
           <div class="result-grid">
             <section class="result-section">
               <p class="eyebrow">Transcript</p>
-              <div class="transcript" id="transcriptOutput">No transcript yet.</div>
+              <div class="transcript" id="transcriptOutput">
+                No transcript yet.
+              </div>
             </section>
             <section class="result-section">
               <p class="eyebrow">Speakers</p>
-              <div class="speaker-list" id="speakerOutput">No speaker segments yet.</div>
+              <div class="speaker-list" id="speakerOutput">
+                No speaker segments yet.
+              </div>
             </section>
           </div>
 
           <section class="result-section">
             <p class="eyebrow">Translation</p>
-            <div class="translation-output" id="translationOutput">No translation yet.</div>
+            <div class="translation-output" id="translationOutput">
+              No translation yet.
+            </div>
           </section>
         </section>
       </section>

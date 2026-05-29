@@ -1,0 +1,50 @@
+[
+  {
+    "file": "Audio_test-1_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.44999999999999996,
+    "der": 0.30565193060996093
+  },
+  {
+    "file": "Audio_test-1_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.4,
+    "der": 0.30565193060996093
+  },
+  {
+    "file": "Audio_test-1_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.35,
+    "der": 0.30565193060996093
+  },
+  {
+    "file": "Audio_test-1_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.30000000000000004,
+    "der": 0.30565193060996093
+  },
+  {
+    "file": "Audio_test_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.44999999999999996,
+    "der": 0.4738878143133464
+  },
+  {
+    "file": "Audio_test_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.4,
+    "der": 0.4738878143133464
+  },
+  {
+    "file": "Audio_test_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.35,
+    "der": 0.4738878143133464
+  },
+  {
+    "file": "Audio_test_1_16k_mono.wav",
+    "method": "agglomerative",
+    "threshold": 0.30000000000000004,
+    "der": 0.4738878143133464
+  }
+]

@@ -23,6 +23,16 @@ class STTService:
         self._processor = None
         self._lock = Lock()
 
+    def unload(self) -> None:
+        self._model = None
+        self._processor = None
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+
     def _prepare_input_features(self, audio: np.ndarray, sr: int) -> torch.Tensor:
         feature_extractor = self._processor.feature_extractor # type: ignore
         extracted = feature_extractor(

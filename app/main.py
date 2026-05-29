@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import gc
 import os
 import sys
 from pathlib import Path
@@ -14,6 +16,8 @@ import torch
 
 from app.config import PROJECT_ROOT, settings
 from app.schemas import (
+    AnnotationAudioItem,
+    AnnotationDocument,
     DiarizationResponse,
     HealthResponse,
     LLMHealthResponse,
@@ -28,6 +32,14 @@ from app.schemas import (
     TranscriptionResponse,
 )
 from app.services.audio import normalize_audio, save_upload_bytes
+from app.services.annotation import (
+    audio_dir as annotation_audio_dir,
+    export_all_rttm,
+    export_rttm_from_payload,
+    list_audio_items,
+    save_template,
+    template_for_audio,
+)
 from app.services.diarization import attach_speakers, diarization_service
 from app.services.llm_service import llm_service
 from app.services.model_status import get_model_statuses
@@ -47,6 +59,27 @@ def configure_console_encoding() -> None:
 
 
 configure_console_encoding()
+
+
+def cleanup_temporary_gpu_memory() -> None:
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def release_inference_models() -> None:
+    diarization_service.unload()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -75,6 +108,7 @@ async def startup_preload_models():
     print(f"[STARTUP][DEBUG] torch build: {torch.__version__}")
     print(f"[STARTUP][DEBUG] STT resolved device: {settings.resolved_stt_device}")
     print(f"[STARTUP][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+    print(f"[STARTUP][DEBUG] diarization device: {settings.diarization_device}")
     if not torch.cuda.is_available():
         print("[STARTUP][WARN] PyTorch is CPU-only or CUDA is unavailable. STT will run on CPU.")
     print("=" * 80)
@@ -87,52 +121,23 @@ async def startup_preload_models():
         
     except Exception as e:
         print(f"       ❌ STT Error: {e}")
-    
     try:
-        # 2. Preload LLM (Ollama Qwen)
-        print("\n🤖 [2/5] Loading LLM (Ollama Qwen2.5)...")
-        result = await run_in_threadpool(llm_service.smoke_test)
-        if result.error:
-            print(f"       ⚠️  LLM Warning: {result.error}")
-        else:
-            print("       ✅ LLM (Ollama) ready!")
-            
-    except Exception as e:
-        print(f"       ⚠️  LLM Error: {e}")
-    
-    try:
-        # 3. Preload Translator (vi-en)
-        print("\n🔄 [3/5] Loading Translation Models...")
-        await run_in_threadpool(translation_service._load, "vi-en")
-        print("       ✅ Translation VI→EN loaded!")
-        
-        await run_in_threadpool(translation_service._load, "en-vi")
-        print("       ✅ Translation EN→VI loaded!")
-        
-    except Exception as e:
-        print(f"       ❌ Translation Error: {e}")
-    
-    try:
-        # 4. Preload Diarization (Speaker detection)
-        print("\n👥 [4/5] Loading Diarization (Speaker Detection)...")
+        # 2. Preload Diarization (Speaker detection)
+        print("\n👥 [2/5] Loading Diarization (Speaker Detection)...")
         await run_in_threadpool(diarization_service._load)
         print("       ✅ Diarization model loaded!")
         
     except Exception as e:
         print(f"       ⚠️  Diarization Error: {e}")
     
-    try:
-        # 5. Preload Summarization
-        print("\n📝 [5/5] Loading Summarization Model...")
-        await run_in_threadpool(summarization_service._load)
-        print("       ✅ Summarization model loaded!")
-        
-    except Exception as e:
-        print(f"       ⚠️  Summarization Error: {e}")
-    
     print("\n" + "=" * 80)
-    print("✨ All models preloaded in RAM. API ready for inference!")
+    print("✨ STT and diarization preloaded in RAM. API ready for inference!")
     print("=" * 80 + "\n")
+
+
+@app.on_event("startup")
+async def startup_create_locks():
+    app.state.inference_lock = asyncio.Lock()
 
 
 # ============================================================================
@@ -149,32 +154,48 @@ async def transcribe_audio_core(
     file: UploadFile,
     language: str,
     include_speakers: bool = False,
-) -> tuple[TranscriptionResponse, DiarizationResponse | None, int, list[str]]:
+) -> tuple[TranscriptionResponse, DiarizationResponse | None, int, int, list[str]]:
     warnings: list[str] = []
-    uploaded_path = await save_uploaded_audio(file)
-    normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
-    transcript = await run_in_threadpool(stt_service.transcribe, normalized_path, language)
+    try:
+        uploaded_path = await save_uploaded_audio(file)
+        normalized_path = await run_in_threadpool(normalize_audio, Path(uploaded_path))
+        transcript = await run_in_threadpool(stt_service.transcribe, normalized_path, language)
 
-    diarization: DiarizationResponse | None = None
-    num_speakers = 0
-    if include_speakers:
-        try:
-            diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
-            transcript = transcript.model_copy(
-                update={"segments": attach_speakers(transcript.segments, diarization.segments)}
-            )
-            num_speakers = len({segment.speaker for segment in transcript.segments if segment.speaker})
-            if num_speakers <= 1:
-                warnings.append(
-                    "Khong tach duoc nhieu nguoi noi: diarization chi phat hien mot speaker."
-                    if num_speakers == 1
-                    else "Khong tach duoc nhieu nguoi noi: diarization khong phat hien speaker ro rang."
+        diarization: DiarizationResponse | None = None
+        detected_speakers = 0
+        num_speakers = 0
+        if include_speakers:
+            try:
+                if settings.resolved_stt_device == "cuda" and settings.diarization_device == "cuda":
+                    print("[API][DEBUG] Releasing STT GPU memory before diarization to maximize available VRAM.")
+                    stt_service.unload()
+                    cleanup_temporary_gpu_memory()
+
+                diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
+                detected_speakers = len({segment.speaker for segment in diarization.segments if segment.speaker})
+                transcript = transcript.model_copy(
+                    update={"segments": attach_speakers(transcript.segments, diarization.segments)}
                 )
-        except Exception as exc:
-            warnings.append(f"Diarization failed: {exc}")
-            num_speakers = 0
+                num_speakers = len({segment.speaker for segment in transcript.segments if segment.speaker})
+                if detected_speakers and num_speakers != detected_speakers:
+                    warnings.append(
+                        f"Diarization detected {detected_speakers} speakers, but transcript assignment resolved to {num_speakers}."
+                    )
+                if num_speakers <= 1:
+                    warnings.append(
+                        "Khong tach duoc nhieu nguoi noi: diarization chi phat hien mot speaker."
+                        if num_speakers == 1
+                        else "Khong tach duoc nhieu nguoi noi: diarization khong phat hien speaker ro rang."
+                    )
+            except Exception as exc:
+                warnings.append(f"Diarization failed: {exc}")
+                detected_speakers = 0
+                num_speakers = 0
 
-    return transcript, diarization, num_speakers, warnings
+        return transcript, diarization, detected_speakers, num_speakers, warnings
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()
 
 
 def to_http_error(exc: Exception) -> HTTPException:
@@ -189,6 +210,11 @@ def web_app() -> FileResponse:
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "app" / "static" / "favicon.svg")
+
+
+@app.get("/annotate", include_in_schema=False)
+def annotate_page() -> FileResponse:
+    return FileResponse(PROJECT_ROOT / "app" / "static" / "annotate.html")
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -238,6 +264,42 @@ def models_status():
     return {"models": get_model_statuses()}
 
 
+@app.get("/api/annotations/audio-files", response_model=list[AnnotationAudioItem])
+def annotation_audio_files() -> list[AnnotationAudioItem]:
+    return [AnnotationAudioItem.model_validate(item) for item in list_audio_items()]
+
+
+@app.get("/api/annotations/audio/{stem}", include_in_schema=False)
+def annotation_audio(stem: str) -> FileResponse:
+    audio_path = annotation_audio_dir() / f"{stem}.wav"
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail=f"Audio not found: {stem}")
+    return FileResponse(audio_path)
+
+
+@app.get("/api/annotations/{stem}", response_model=AnnotationDocument)
+def get_annotation(stem: str) -> AnnotationDocument:
+    return AnnotationDocument.model_validate(template_for_audio(stem))
+
+
+@app.put("/api/annotations/{stem}", response_model=AnnotationDocument)
+def put_annotation(stem: str, payload: AnnotationDocument) -> AnnotationDocument:
+    saved_path = save_template(stem, payload.model_dump())
+    return AnnotationDocument.model_validate_json(saved_path.read_text(encoding="utf-8"))
+
+
+@app.post("/api/annotations/{stem}/export", response_model=dict)
+def export_annotation(stem: str) -> dict:
+    output_path = export_rttm_from_payload(stem, template_for_audio(stem))
+    return {"ok": True, "rttm": str(output_path)}
+
+
+@app.post("/api/annotations/export-all", response_model=dict)
+def export_all_annotations() -> dict:
+    outputs = export_all_rttm()
+    return {"ok": True, "count": len(outputs), "outputs": [str(path) for path in outputs]}
+
+
 @app.post("/api/transcribe", response_model=TranscriptionResponse)
 async def transcribe_audio(
     file: Annotated[UploadFile, File(...)],
@@ -247,14 +309,18 @@ async def transcribe_audio(
         Query(description="Attach diarization speaker labels to each transcript segment."),
     ] = False,
 ) -> TranscriptionResponse:
+    transcript: TranscriptionResponse | None = None
     try:
-        print(f"[API][DEBUG] /api/transcribe requested: file={file.filename}, language={language}")
-        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
-        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
-        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, include_speakers)
+        async with app.state.inference_lock:
+            print(f"[API][DEBUG] /api/transcribe requested: file={file.filename}, language={language}")
+            print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+            print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+            transcript, diarization, detected_speakers, num_speakers, warnings = await transcribe_audio_core(file, language, include_speakers)
         if include_speakers:
             return transcript.model_copy(
                 update={
+                    "detected_speakers": detected_speakers,
+                    "assigned_speakers": num_speakers,
                     "num_speakers": num_speakers,
                     "diarization": diarization,
                     "warnings": warnings,
@@ -268,6 +334,9 @@ async def transcribe_audio(
         print(f"[API][ERROR] Transcription failed: {exc}")
         print(traceback.format_exc())
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()
 
 
 @app.post("/api/transcribe-with-speakers", response_model=TranscribeWithSpeakersResponse)
@@ -280,14 +349,15 @@ async def transcribe_with_speakers(
     If 2 or more speakers detected, output shows: SPEAKER_00: text, SPEAKER_01: text, etc.
     """
     try:
-        print(f"\n{'='*80}")
-        print(f"[API] /api/transcribe-with-speakers request")
-        print(f"[API] File: {file.filename}, Language: {language}")
-        print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
-        print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
-        print(f"{'='*80}")
-        
-        transcript, diarization, num_speakers, warnings = await transcribe_audio_core(file, language, True)
+        async with app.state.inference_lock:
+            print(f"\n{'='*80}")
+            print(f"[API] /api/transcribe-with-speakers request")
+            print(f"[API] File: {file.filename}, Language: {language}")
+            print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
+            print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
+            print(f"{'='*80}")
+            
+            transcript, diarization, detected_speakers, num_speakers, warnings = await transcribe_audio_core(file, language, True)
         print(f"[API] STT completed - {len(transcript.text)} chars")
         transcript_with_speakers = transcript
 
@@ -295,7 +365,8 @@ async def transcribe_with_speakers(
         merged_text = format_merged_transcript(transcript_with_speakers.segments)
         
         print(f"\n[API] FINAL OUTPUT:")
-        print(f"  Speakers: {num_speakers}")
+        print(f"  Detected speakers: {detected_speakers}")
+        print(f"  Assigned speakers: {num_speakers}")
         print(f"  Segments: {len(transcript_with_speakers.segments)}")
         print(f"  Text length: {len(merged_text)} chars")
         print(f"{'='*80}\n")
@@ -303,6 +374,8 @@ async def transcribe_with_speakers(
         return TranscribeWithSpeakersResponse(
             language=transcript.language,
             language_probability=transcript.language_probability,
+            detected_speakers=detected_speakers,
+            assigned_speakers=num_speakers,
             num_speakers=num_speakers,
             segments=transcript_with_speakers.segments,
             merged_text=merged_text,
@@ -313,6 +386,8 @@ async def transcribe_with_speakers(
     except Exception as exc:
         print(f"[API] ERROR: {exc}")
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
 
 
 @app.post("/api/diarize", response_model=DiarizationResponse)
@@ -325,6 +400,9 @@ async def diarize_audio(file: Annotated[UploadFile, File(...)]) -> DiarizationRe
         raise
     except Exception as exc:
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()
 
 
 @app.post("/api/process", response_model=ProcessResponse)
@@ -351,6 +429,9 @@ async def process_audio(
         raise
     except Exception as exc:
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()
 
 
 @app.post("/api/translate", response_model=TranslateResponse)
@@ -365,6 +446,9 @@ async def translate_text(payload: TranslateRequest) -> TranslateResponse:
         return TranslateResponse(direction=payload.direction, text=payload.text, translated_text=translated)
     except Exception as exc:
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()
 
 
 @app.post("/api/summarize", response_model=SummaryResponse)
@@ -379,3 +463,6 @@ async def summarize_text(payload: SummaryRequest) -> SummaryResponse:
         return SummaryResponse(text=payload.text, summary=summary)
     except Exception as exc:
         raise to_http_error(exc) from exc
+    finally:
+        cleanup_temporary_gpu_memory()
+        release_inference_models()

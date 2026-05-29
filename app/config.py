@@ -7,7 +7,7 @@ import torch
 
 # Load .env file if it exists
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv # pyright: ignore[reportMissingImports]
     load_dotenv()
 except ImportError:
     pass  # python-dotenv not required
@@ -52,7 +52,7 @@ def configure_local_environment() -> None:
 
     # Runtime device preferences
     os.environ.setdefault("MODEL_DEVICE", "auto")
-    os.environ.setdefault("DIARIZATION_DEVICE", "cpu")
+    os.environ.setdefault("DIARIZATION_DEVICE", "auto")
     os.environ.setdefault("STT_DEVICE", "cuda")
     os.environ.setdefault("STT_COMPUTE_TYPE", "auto")
     os.environ.setdefault("STT_CPU_THREADS", str(min(8, os.cpu_count() or 4)))
@@ -87,6 +87,25 @@ class Settings:
     stt_chunk_duration_seconds: int = int(os.environ.get("STT_CHUNK_DURATION", "30"))
     min_diarization_duration_seconds: float = 8.0
     audio_sample_rate: int = 16000
+    diarization_cluster_threshold: float = float(os.environ.get("DIARIZATION_CLUSTER_THRESHOLD", "0.48"))
+    diarization_cluster_fa: float = float(os.environ.get("DIARIZATION_CLUSTER_FA", "0.07"))
+    diarization_cluster_fb: float = float(os.environ.get("DIARIZATION_CLUSTER_FB", "0.8"))
+    diarization_min_duration_off: float = float(os.environ.get("DIARIZATION_MIN_DURATION_OFF", "0.0"))
+    diarization_min_speakers: int = max(1, int(os.environ.get("DIARIZATION_MIN_SPEAKERS", "1")))
+    diarization_max_speakers: int = max(
+        max(1, int(os.environ.get("DIARIZATION_MIN_SPEAKERS", "1"))),
+        int(os.environ.get("DIARIZATION_MAX_SPEAKERS", "4")),
+    )
+    diarization_aggressive_split_after_seconds: float = float(
+        os.environ.get("DIARIZATION_AGGRESSIVE_SPLIT_AFTER_SECONDS", "20")
+    )
+    diarization_cpu_after_seconds: float = float(
+        os.environ.get("DIARIZATION_CPU_AFTER_SECONDS", "30")
+    )
+    diarization_gpu_memory_limit_mb: int = max(
+        0,
+        int(os.environ.get("DIARIZATION_GPU_MEMORY_LIMIT_MB", "1500")),
+    )
     
     # Directories
     upload_dir: Path = UPLOAD_DIR
@@ -122,6 +141,8 @@ class Settings:
         preferred = os.environ.get("DIARIZATION_DEVICE", "cpu").lower()
         if preferred in {"cuda", "gpu"} and torch.cuda.is_available():
             return "cuda"
+        if preferred == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
         return "cpu"
 
     @property

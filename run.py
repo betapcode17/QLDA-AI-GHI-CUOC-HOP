@@ -25,8 +25,8 @@ import torch
 def configure_console_encoding() -> None:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace") # type: ignore
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace") # type: ignore
     except Exception:
         pass
 
@@ -71,7 +71,7 @@ def check_runtime_device():
     try:
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
-            cuda_version = torch.version.cuda or "unknown"
+            cuda_version = torch.version.cuda or "unknown" # type: ignore
             print_success(f"Running on CUDA")
             print_info(f"  GPU: {gpu_name}")
             print_info(f"  CUDA: {cuda_version}")
@@ -111,7 +111,7 @@ def check_ollama():
                 print_warning("Ollama is running but no models available")
                 return False
                 
-    except urllib.error.URLError:
+    except urllib.error.URLError: # type: ignore
         print_error("Cannot connect to Ollama")
         print_info("Make sure Ollama is running:")
         print_info("  - Windows: Start the Ollama app")

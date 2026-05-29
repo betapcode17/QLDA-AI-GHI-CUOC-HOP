@@ -18,6 +18,74 @@ const formatTime = (seconds) => {
   return `${minutes}:${remainingSeconds}`;
 };
 
+const formatSpeechTime = (seconds) => {
+  if (!Number.isFinite(seconds)) {
+    return "00:00";
+  }
+
+  const totalMilliseconds = Math.round(seconds * 1000);
+  const minutes = String(Math.floor(totalMilliseconds / 60000)).padStart(
+    2,
+    "0",
+  );
+  const remainingMilliseconds = totalMilliseconds % 60000;
+  const remainingSeconds = String(
+    Math.floor(remainingMilliseconds / 1000),
+  ).padStart(2, "0");
+  const fractional = String(remainingMilliseconds % 1000).padStart(3, "0");
+  return `${minutes}:${remainingSeconds}.${fractional}`;
+};
+
+const formatSpeechRange = (segment) =>
+  `${formatSpeechTime(segment.start)} - ${formatSpeechTime(segment.end)}`;
+
+const attachSpeakersToTranscript = (
+  transcriptSegments = [],
+  diarizationSegments = [],
+) => {
+  if (!diarizationSegments.length) {
+    return transcriptSegments.map((segment) => ({ ...segment, speaker: null }));
+  }
+
+  return transcriptSegments.map((segment) => {
+    let bestSpeaker = null;
+    let bestOverlap = 0;
+
+    diarizationSegments.forEach((diarizedSegment) => {
+      const overlapStart = Math.max(segment.start, diarizedSegment.start);
+      const overlapEnd = Math.min(segment.end, diarizedSegment.end);
+      const overlap = Math.max(0, overlapEnd - overlapStart);
+
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestSpeaker = diarizedSegment.speaker;
+      }
+    });
+
+    if (!bestSpeaker) {
+      const midpoint = (segment.start + segment.end) / 2;
+      const nearest = diarizationSegments.reduce((best, current) => {
+        if (!best) {
+          return current;
+        }
+
+        const bestDistance = Math.abs((best.start + best.end) / 2 - midpoint);
+        const currentDistance = Math.abs(
+          (current.start + current.end) / 2 - midpoint,
+        );
+        return currentDistance < bestDistance ? current : best;
+      }, null);
+
+      bestSpeaker = nearest?.speaker || null;
+    }
+
+    return {
+      ...segment,
+      speaker: bestSpeaker,
+    };
+  });
+};
+
 const transcriptToEditorText = (segments = []) =>
   segments
     .map((segment) => {
@@ -67,6 +135,17 @@ function UploadAudio() {
   const [llmResult, setLlmResult] = useState(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+  const [speakerProcessing, setSpeakerProcessing] = useState(false);
+
+  const transcriptSegments = transcription?.segments || [];
+  const detectedSpeakers = useMemo(
+    () => [
+      ...new Set(
+        transcriptSegments.map((segment) => segment.speaker).filter(Boolean),
+      ),
+    ],
+    [transcriptSegments],
+  );
 
   const canTranscribe = Boolean(selectedFile) && !processing;
   const canTranslate =
@@ -134,6 +213,7 @@ function UploadAudio() {
     setOriginalTranscriptText("");
     setEditedTranscriptText("");
     setTranslatedCache({});
+    setSpeakerProcessing(false);
     resetAnalysisState();
     setError("");
   };
@@ -176,6 +256,7 @@ function UploadAudio() {
     }
 
     setProcessing(true);
+    setSpeakerProcessing(false);
     setError("");
     setTranscription(null);
     setOriginalTranscriptText("");
@@ -183,20 +264,81 @@ function UploadAudio() {
     setTranslatedCache({});
 
     try {
-      const response = await uploadService.transcribeAudio(
+      const transcriptResponse = await uploadService.transcribeAudio(
         selectedFile,
         sourceLanguage,
-        true,
+        false,
       );
-      const editorText = buildTranscriptText(response);
-      setTranscription(response);
+      const editorText = buildTranscriptText(transcriptResponse);
+      setTranscription({
+        ...transcriptResponse,
+        detected_speakers: 0,
+        assigned_speakers: 0,
+        num_speakers: 0,
+      });
       setOriginalTranscriptText(editorText);
       setEditedTranscriptText(editorText);
       setDisplayLanguage(sourceLanguage);
       setTranslatedCache({});
       resetAnalysisState();
+
+      setSpeakerProcessing(true);
+      void uploadService
+        .detectSpeakers(selectedFile)
+        .then((diarizationResponse) => {
+          const diarizationSegments = diarizationResponse?.segments || [];
+          const transcriptSegments = transcriptResponse?.segments || [];
+          const assignedSegments = attachSpeakersToTranscript(
+            transcriptSegments,
+            diarizationSegments,
+          );
+          const detectedSpeakers = new Set(
+            diarizationSegments
+              .map((segment) => segment.speaker)
+              .filter(Boolean),
+          ).size;
+          const assignedSpeakers = new Set(
+            assignedSegments.map((segment) => segment.speaker).filter(Boolean),
+          ).size;
+          const speakerLabeledText = buildTranscriptText({
+            segments: assignedSegments,
+          });
+
+          setTranscription((current) =>
+            current
+              ? {
+                  ...current,
+                  diarization: diarizationResponse,
+                  detected_speakers: detectedSpeakers,
+                  assigned_speakers: assignedSpeakers,
+                  num_speakers: assignedSpeakers,
+                  segments: assignedSegments,
+                }
+              : current,
+          );
+
+          setOriginalTranscriptText((current) => {
+            if (current === editorText) {
+              return speakerLabeledText;
+            }
+            return current;
+          });
+          setEditedTranscriptText((current) => {
+            if (current === editorText) {
+              return speakerLabeledText;
+            }
+            return current;
+          });
+        })
+        .catch((speakerError) => {
+          setError(speakerError.message);
+        })
+        .finally(() => {
+          setSpeakerProcessing(false);
+        });
     } catch (transcribeError) {
       setError(transcribeError.message);
+      setSpeakerProcessing(false);
     } finally {
       setProcessing(false);
     }
@@ -405,9 +547,14 @@ function UploadAudio() {
           <p className="mt-2 text-sm text-slate-300">
             Speaker labels:{" "}
             {transcription
-              ? `${transcription.num_speakers ?? 0} detected`
+              ? `${transcription.detected_speakers ?? transcription.num_speakers ?? 0} detected / ${transcription.assigned_speakers ?? transcription.num_speakers ?? 0} assigned`
               : "on"}
           </p>
+          {detectedSpeakers.length ? (
+            <p className="mt-2 text-sm text-slate-300">
+              Detected speakers: {detectedSpeakers.join(", ")}
+            </p>
+          ) : null}
           {transcription?.warnings?.length ? (
             <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
               {transcription.warnings.map((warning, index) => (
@@ -418,6 +565,11 @@ function UploadAudio() {
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
             Display language: {displayLanguageLabels[displayLanguage]}
           </p>
+          {speakerProcessing ? (
+            <p className="mt-2 text-sm text-accent-200">
+              Transcript is ready. Detecting speakers in the background...
+            </p>
+          ) : null}
         </div>
 
         <button
@@ -503,6 +655,55 @@ function UploadAudio() {
             rows={1}
             className="mt-6 w-full resize-none overflow-hidden rounded-[28px] border border-white/10 bg-white/5 px-6 py-6 text-lg leading-9 text-slate-100 outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20"
           />
+
+          <div className="mt-6 rounded-[28px] border border-white/10 bg-white/5 p-5">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.2em] text-accent-300">
+                  Speaker timeline
+                </p>
+                <h3 className="mt-2 text-lg font-bold text-white">
+                  Who spoke, when, and what they said
+                </h3>
+              </div>
+              <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">
+                {transcriptSegments.length} segments
+              </span>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              {transcriptSegments.length ? (
+                transcriptSegments.map((segment, index) => (
+                  <article
+                    key={`${segment.speaker || "speaker"}-${segment.start}-${segment.end}-${index}`}
+                    className="rounded-[24px] border border-white/10 bg-slate-950/80 p-4"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <span className="rounded-full bg-accent-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-accent-100">
+                          {segment.speaker || "SPEAKER"}
+                        </span>
+                        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                          {formatSpeechRange(segment)}
+                        </span>
+                      </div>
+                      <span className="text-xs text-slate-500">
+                        Segment {index + 1}
+                      </span>
+                    </div>
+                    <p className="mt-4 text-sm leading-7 text-slate-200">
+                      {segment.text || "No text returned for this segment."}
+                    </p>
+                  </article>
+                ))
+              ) : (
+                <div className="rounded-[24px] border border-dashed border-white/10 px-4 py-8 text-sm text-slate-500">
+                  Speaker segments will appear here after transcription
+                  completes.
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         <section className="rounded-[28px] border border-white/10 bg-slate-950/70 p-6 shadow-panel">
