@@ -2,14 +2,39 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.config import settings
 from app.schemas import ProcessResponse, TranscriptionResponse
 from app.services.audio import normalize_audio, extract_segment_to_file
 from app.services.diarization import diarization_service
+from app.services.gpu_memory import log_cuda_memory, release_cuda_memory
 from app.services.llm_service import llm_service
 from app.services.stt import stt_service
 from app.services.summarization import summarization_service
 from app.services.text_quality import LOW_INFORMATION_SUMMARY, is_low_information_transcript
 from app.services.translation import Direction, translation_service
+
+
+def compact_diarization_segments(segments):
+    if not segments:
+        return []
+
+    ordered = sorted(segments, key=lambda item: (float(item.start), float(item.end)))
+    compacted = []
+    for segment in ordered:
+        duration = float(segment.end) - float(segment.start)
+        if duration < settings.stt_min_segment_seconds:
+            continue
+
+        if compacted:
+            previous = compacted[-1]
+            gap = float(segment.start) - float(previous.end)
+            if previous.speaker == segment.speaker and gap <= settings.diarization_merge_gap_seconds:
+                compacted[-1] = previous.model_copy(update={"end": segment.end})
+                continue
+
+        compacted.append(segment)
+
+    return compacted or ordered
 
 
 def format_merged_transcript(segments) -> str:
@@ -20,6 +45,11 @@ def format_merged_transcript(segments) -> str:
     return "\n".join(lines)
 
 
+def emit_stream_event(callback, event: str, data: dict) -> None:
+    if callback is not None:
+        callback(event, data)
+
+
 def process_meeting_audio(
     input_audio_path: Path,
     language: str | None = "vi",
@@ -28,6 +58,7 @@ def process_meeting_audio(
     translate_to: Direction | None = None,
     include_summary: bool = True,
     include_llm: bool = True,
+    stream_callback=None,
 ) -> ProcessResponse:
     warnings: list[str] = []
     print(
@@ -35,8 +66,10 @@ def process_meeting_audio(
         f"include_diarization={include_diarization} | expected_speakers={expected_speakers or 'auto'} | "
         f"translate_to={translate_to or 'none'} | include_summary={include_summary} | include_llm={include_llm}"
     )
+    emit_stream_event(stream_callback, "status", {"stage": "normalizing", "message": "Normalizing audio"})
     normalized_audio = normalize_audio(input_audio_path)
     print(f"[PIPELINE] normalized_audio={normalized_audio.name}")
+    log_cuda_memory("pipeline start")
 
     diarization = None
     transcript = None
@@ -46,8 +79,16 @@ def process_meeting_audio(
     if include_diarization:
         try:
             print(f"[PIPELINE] running diarization | expected_speakers={expected_speakers or 'auto'}")
+            emit_stream_event(stream_callback, "status", {"stage": "diarization", "message": "Detecting speakers"})
+            stt_service.unload()
+            release_cuda_memory("before diarization")
             diarization = diarization_service.diarize(normalized_audio, expected_speakers=expected_speakers)
             print(f"[PIPELINE] diarization segments={len(diarization.segments) if diarization else 0}")
+            emit_stream_event(
+                stream_callback,
+                "diarization",
+                {"segments": [segment.model_dump() for segment in diarization.segments] if diarization else []},
+            )
         except Exception as exc:
             warnings.append(f"Diarization failed: {exc}")
             print(f"[PIPELINE][ERROR] diarization failed: {exc}")
@@ -55,51 +96,80 @@ def process_meeting_audio(
     # If diarization produced segments, transcribe each segment separately.
     if diarization and diarization.segments:
         print("[PIPELINE] Transcribing per-diarization segments")
+        diarization_segments = compact_diarization_segments(diarization.segments)
+        if len(diarization_segments) != len(diarization.segments):
+            print(
+                f"[PIPELINE] compacted diarization segments {len(diarization.segments)} -> {len(diarization_segments)} "
+                f"(min_segment={settings.stt_min_segment_seconds}s, merge_gap={settings.diarization_merge_gap_seconds}s)"
+            )
         all_segments = []
         text_parts: list[str] = []
         next_id = 0
+        temporary_segment_paths: list[Path] = []
 
         # Free diarization VRAM before loading STT model
         try:
             diarization_service.unload()
         except Exception:
             pass
+        release_cuda_memory("before per-segment STT")
 
-        for d in diarization.segments:
-            try:
-                seg_path = extract_segment_to_file(Path(normalized_audio), float(d.start), float(d.end))
-            except Exception as e:
-                warnings.append(f"Segment extraction failed for {d}: {e}")
-                print(f"[PIPELINE][WARN] segment extraction failed | speaker={d.speaker} | start={d.start} | end={d.end} | error={e}")
-                continue
+        try:
+            for d in diarization_segments:
+                try:
+                    seg_path = extract_segment_to_file(Path(normalized_audio), float(d.start), float(d.end))
+                    temporary_segment_paths.append(seg_path)
+                except Exception as e:
+                    warnings.append(f"Segment extraction failed for {d}: {e}")
+                    print(f"[PIPELINE][WARN] segment extraction failed | speaker={d.speaker} | start={d.start} | end={d.end} | error={e}")
+                    continue
 
-            try:
-                print(f"[PIPELINE] STT segment | speaker={d.speaker} | start={d.start} | end={d.end} | file={seg_path.name}")
-                resp = stt_service.transcribe(seg_path, language=language)
-            except Exception as e:
-                warnings.append(f"STT failed for segment {d}: {e}")
-                print(f"[PIPELINE][ERROR] STT failed | speaker={d.speaker} | error={e}")
-                continue
+                try:
+                    print(f"[PIPELINE] STT segment | speaker={d.speaker} | start={d.start} | end={d.end} | file={seg_path.name}")
+                    emit_stream_event(
+                        stream_callback,
+                        "status",
+                        {
+                            "stage": "stt",
+                            "message": f"Transcribing {d.speaker}",
+                            "speaker": d.speaker,
+                            "start": d.start,
+                            "end": d.end,
+                        },
+                    )
+                    resp = stt_service.transcribe(seg_path, language=language)
+                except Exception as e:
+                    warnings.append(f"STT failed for segment {d}: {e}")
+                    print(f"[PIPELINE][ERROR] STT failed | speaker={d.speaker} | error={e}")
+                    continue
 
-            # Offset returned transcript segments by segment start and attach speaker
-            for s in resp.segments:
-                adjusted = s.model_copy(update={
-                    "start": round(s.start + float(d.start), 3),
-                    "end": round(s.end + float(d.start), 3),
-                    "speaker": d.speaker,
-                    "id": next_id,
-                })
-                all_segments.append(adjusted)
-                next_id += 1
+                # Offset returned transcript segments by segment start and attach speaker
+                for s in resp.segments:
+                    adjusted = s.model_copy(update={
+                        "start": round(s.start + float(d.start), 3),
+                        "end": round(s.end + float(d.start), 3),
+                        "speaker": d.speaker,
+                        "id": next_id,
+                    })
+                    all_segments.append(adjusted)
+                    emit_stream_event(stream_callback, "transcript_segment", adjusted.model_dump())
+                    next_id += 1
 
-            if resp.text and resp.text.strip():
-                text_parts.append(resp.text.strip())
+                if resp.text and resp.text.strip():
+                    text_parts.append(resp.text.strip())
+        finally:
+            for seg_path in temporary_segment_paths:
+                try:
+                    seg_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         # Unload STT model to free VRAM after per-segment transcription
         try:
             stt_service.unload()
         except Exception:
             pass
+        release_cuda_memory("after per-segment STT")
 
         merged_transcript = " \n".join(text_parts).strip()
         transcript = TranscriptionResponse(
@@ -117,12 +187,21 @@ def process_meeting_audio(
         # No diarization — single-file STT
         try:
             print("[PIPELINE] no diarization segments; running whole-file STT")
+            emit_stream_event(stream_callback, "status", {"stage": "stt", "message": "Transcribing audio"})
+            diarization_service.unload()
+            release_cuda_memory("before whole-file STT")
             transcript = stt_service.transcribe(normalized_audio, language=language)
+            for segment in transcript.segments:
+                emit_stream_event(stream_callback, "transcript_segment", segment.model_dump())
             low_information = is_low_information_transcript(transcript.text)
         except Exception as e:
             warnings.append(f"STT failed: {e}")
             print(f"[PIPELINE][ERROR] whole-file STT failed: {e}")
             transcript = TranscriptionResponse(language=language or "vi", language_probability=None, segments=[], text="", warnings=[str(e)])
+
+    if settings.low_vram_mode:
+        stt_service.unload()
+        release_cuda_memory("before post-STT NLP")
 
     merged_transcript = format_merged_transcript(transcript.segments)
     detected_speakers = len({segment.speaker for segment in diarization.segments if segment.speaker}) if diarization and diarization.segments else 0
@@ -137,6 +216,7 @@ def process_meeting_audio(
         )
     translated_transcript = None
     if translate_to is not None and transcript.text.strip() and not low_information:
+        emit_stream_event(stream_callback, "status", {"stage": "translation", "message": "Translating transcript"})
         try:
             translated_transcript = translation_service.translate(transcript.text, translate_to)
         except Exception as exc:
@@ -147,6 +227,7 @@ def process_meeting_audio(
     summary = None
     translated_summary = None
     if include_summary and transcript.text.strip():
+        emit_stream_event(stream_callback, "status", {"stage": "summary", "message": "Generating summary"})
         try:
             language_hint = (language or "").lower()
             if low_information:
@@ -162,6 +243,7 @@ def process_meeting_audio(
 
     llm = None
     if include_llm and merged_transcript.strip() and not low_information:
+        emit_stream_event(stream_callback, "status", {"stage": "llm", "message": "Running LLM refinement"})
         language_hint = (language or "").lower()
         llm_existing_summary = summary if language_hint.startswith("vi") else translated_summary or summary
         llm = llm_service.refine_meeting(
@@ -177,8 +259,12 @@ def process_meeting_audio(
         f"[PIPELINE] done | detected_speakers={detected_speakers} | assigned_speakers={assigned_speakers} | "
         f"segments={len(transcript.segments)} | warnings={len(warnings)}"
     )
+    if settings.low_vram_mode:
+        stt_service.unload()
+        diarization_service.unload()
+        release_cuda_memory("pipeline done")
 
-    return ProcessResponse(
+    response = ProcessResponse(
         transcript=transcript,
         diarization=diarization,
         detected_speakers=detected_speakers,
@@ -199,3 +285,5 @@ def process_meeting_audio(
         normalized_audio_path=str(normalized_audio),
         warnings=warnings,
     )
+    emit_stream_event(stream_callback, "done", response.model_dump())
+    return response

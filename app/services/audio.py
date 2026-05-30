@@ -78,7 +78,14 @@ def normalize_audio(input_path: Path) -> Path:
         "-vn",
         str(output_path),
     ]
-    completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True)
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if completed.returncode != 0:
         raise RuntimeError(f"ffmpeg failed to normalize audio: {completed.stderr.strip()}")
     return output_path
@@ -122,7 +129,14 @@ def extract_segment_to_file(audio_path: Path, start: float, end: float, output_p
         str(output_path),
     ]
     # run
-    completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True)
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if completed.returncode != 0:
         raise RuntimeError(f"ffmpeg failed to extract segment: {completed.stderr.strip()}")
     return output_path

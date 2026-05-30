@@ -1,0 +1,270 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  Admin
+  Manager
+  Member
+}
+
+enum MeetingStatus {
+  Scheduled
+  InProgress
+  Completed
+  Archived
+}
+
+enum MeetingRole {
+  Host
+  CoHost
+  Participant
+}
+
+enum FileType {
+  Audio
+  Video
+  Transcript
+  Other
+}
+
+enum SentimentLabel {
+  Positive
+  Neutral
+  Negative
+}
+
+enum BehaviorLabel {
+  Agreement
+  Disagreement
+  Suggestion
+  Question
+  Decision
+  Action
+}
+
+enum SummaryType {
+  Executive
+  Detailed
+  ActionItems
+  KeyDecisions
+}
+
+enum ActionItemStatus {
+  Todo
+  InProgress
+  Done
+}
+
+enum Priority {
+  Low
+  Medium
+  High
+  Critical
+}
+
+model User {
+  id             String             @id @default(uuid())
+  username       String             @unique
+  passwordHash   String             @map("password_hash")
+  fullName       String             @map("full_name")
+  email          String             @unique
+  role           Role               @default(Member)
+  tokenVersion   Int                @default(0) @map("token_version")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  deletedAt      DateTime?          @map("deleted_at")
+  participants   MeetingParticipant[]
+  notes          UserBookmarkNote[]
+  logs           SystemLog[]
+
+  @@index([role])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model Meeting {
+  id           String               @id @default(uuid())
+  title        String
+  description  String?
+  startTime    DateTime?            @map("start_time")
+  endTime      DateTime?            @map("end_time")
+  passcode     String?
+  status       MeetingStatus        @default(Scheduled)
+  folderId     String?              @map("folder_id")
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+  deletedAt    DateTime?            @map("deleted_at")
+  participants MeetingParticipant[]
+  speakers     Speaker[]
+  transcripts  Transcript[]
+  summaries    Summary[]
+  keywords     MeetingKeyword[]
+  files        MeetingFile[]
+  actionItems  ActionItem[]
+  notes        UserBookmarkNote[]
+
+  @@index([status, startTime])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("meetings")
+}
+
+model MeetingParticipant {
+  meetingId   String      @map("meeting_id")
+  userId      String      @map("user_id")
+  meetingRole MeetingRole @default(Participant) @map("meeting_role")
+  joinedAt    DateTime    @default(now()) @map("joined_at")
+  meeting     Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([meetingId, userId])
+  @@index([userId])
+  @@map("meeting_participants")
+}
+
+model Speaker {
+  id           String       @id @default(uuid())
+  meetingId    String       @map("meeting_id")
+  speakerLabel String       @map("speaker_label")
+  realName     String?      @map("real_name")
+  colorHex     String?      @map("color_hex")
+  deletedAt    DateTime?    @map("deleted_at")
+  meeting      Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  transcripts  Transcript[]
+
+  @@unique([meetingId, speakerLabel])
+  @@index([meetingId])
+  @@index([deletedAt])
+  @@map("speakers")
+}
+
+model Transcript {
+  id              String          @id @default(uuid())
+  meetingId       String          @map("meeting_id")
+  speakerId       String?         @map("speaker_id")
+  startTimestamp  Decimal?        @map("start_timestamp") @db.Decimal(12, 3)
+  endTimestamp    Decimal?        @map("end_timestamp") @db.Decimal(12, 3)
+  originalText    String          @map("original_text")
+  translatedText  String?         @map("translated_text")
+  sentimentLabel  SentimentLabel? @map("sentiment_label")
+  behaviorLabel   BehaviorLabel?  @map("behavior_label")
+  isHighlighted   Boolean         @default(false) @map("is_highlighted")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  deletedAt       DateTime?       @map("deleted_at")
+  meeting         Meeting         @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  speaker         Speaker?        @relation(fields: [speakerId], references: [id], onDelete: SetNull)
+  actionItems     ActionItem[]
+  notes           UserBookmarkNote[]
+
+  @@index([meetingId, startTimestamp])
+  @@index([speakerId])
+  @@index([sentimentLabel])
+  @@index([behaviorLabel])
+  @@index([deletedAt])
+  @@map("transcripts")
+}
+
+model Summary {
+  id          String      @id @default(uuid())
+  meetingId   String      @map("meeting_id")
+  summaryType SummaryType @map("summary_type")
+  content     String
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  meeting     Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, summaryType])
+  @@map("summaries")
+}
+
+model MeetingKeyword {
+  id             String   @id @default(uuid())
+  meetingId      String   @map("meeting_id")
+  keyword        String
+  frequencyCount Int      @default(1) @map("frequency_count")
+  meeting        Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, keyword])
+  @@index([frequencyCount])
+  @@map("meeting_keywords")
+}
+
+model MeetingFile {
+  id         String   @id @default(uuid())
+  meetingId  String   @map("meeting_id")
+  fileType   FileType @map("file_type")
+  filePath   String   @map("file_path")
+  fileName   String?  @map("file_name")
+  mimeType   String?  @map("mime_type")
+  fileSize   BigInt   @map("file_size")
+  uploadedAt DateTime @default(now()) @map("uploaded_at")
+  deletedAt  DateTime? @map("deleted_at")
+  meeting    Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId, fileType])
+  @@index([deletedAt])
+  @@map("meeting_files")
+}
+
+model ActionItem {
+  id                 String           @id @default(uuid())
+  meetingId          String           @map("meeting_id")
+  taskContent        String           @map("task_content")
+  assigneeName       String?          @map("assignee_name")
+  deadline           DateTime?
+  priority           Priority         @default(Medium)
+  status             ActionItemStatus @default(Todo)
+  sourceTranscriptId String?          @map("source_transcript_id")
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @updatedAt @map("updated_at")
+  deletedAt          DateTime?        @map("deleted_at")
+  meeting            Meeting          @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  sourceTranscript   Transcript?      @relation(fields: [sourceTranscriptId], references: [id], onDelete: SetNull)
+
+  @@index([meetingId, status])
+  @@index([priority])
+  @@index([deletedAt])
+  @@map("action_items")
+}
+
+model UserBookmarkNote {
+  id           String      @id @default(uuid())
+  meetingId    String      @map("meeting_id")
+  userId       String      @map("user_id")
+  transcriptId String?     @map("transcript_id")
+  noteContent  String?     @map("note_content")
+  isBookmark   Boolean     @default(true) @map("is_bookmark")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+  deletedAt    DateTime?   @map("deleted_at")
+  meeting      Meeting     @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transcript   Transcript? @relation(fields: [transcriptId], references: [id], onDelete: SetNull)
+
+  @@index([meetingId, userId])
+  @@index([transcriptId])
+  @@index([deletedAt])
+  @@map("user_bookmark_notes")
+}
+
+model SystemLog {
+  id         String   @id @default(uuid())
+  timestamp  DateTime @default(now())
+  userId     String?  @map("user_id")
+  actionType String   @map("action_type")
+  ipAddress  String?  @map("ip_address")
+  details    Json?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([timestamp])
+  @@index([userId])
+  @@index([actionType])
+  @@map("system_logs")
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import os
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import torch
 
@@ -41,6 +42,7 @@ from app.services.annotation import (
     template_for_audio,
 )
 from app.services.diarization import attach_speakers, diarization_service
+from app.services.gpu_memory import release_cuda_memory
 from app.services.llm_service import llm_service
 from app.services.model_status import get_model_statuses
 from app.services.pipeline import format_merged_transcript, process_meeting_audio
@@ -62,23 +64,11 @@ configure_console_encoding()
 
 
 def cleanup_temporary_gpu_memory() -> None:
-    gc.collect()
-    if not torch.cuda.is_available():
-        return
-
-    try:
-        torch.cuda.synchronize()
-    except Exception:
-        pass
-
-    torch.cuda.empty_cache()
-    try:
-        torch.cuda.ipc_collect()
-    except Exception:
-        pass
+    release_cuda_memory()
 
 
 def release_inference_models() -> None:
+    stt_service.unload()
     diarization_service.unload()
 
 
@@ -95,14 +85,19 @@ app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "app" / "static"), nam
 
 
 # ============================================================================
-# STARTUP: Preload all models into memory
+# STARTUP: Warm up core models when the API boots
 # ============================================================================
 
 @app.on_event("startup")
 async def startup_preload_models():
-    """Preload all models at startup for faster inference."""
+    """Warm up the STT model on startup and preload diarization when allowed.
+
+    STT is the core user-facing model, so loading it during startup avoids the
+    first-request penalty. Diarization remains optional because it is the most
+    memory-hungry part of the pipeline.
+    """
     print("\n" + "=" * 80)
-    print("STARTUP: Preloading models into RAM...")
+    print("STARTUP: Model warmup policy")
     print(f"[STARTUP][DEBUG] torch.cuda.is_available(): {torch.cuda.is_available()}")
     print(f"[STARTUP][DEBUG] torch.version.cuda: {getattr(getattr(torch, 'version', None), 'cuda', None)}")
     print(f"[STARTUP][DEBUG] torch build: {torch.__version__}")
@@ -111,27 +106,37 @@ async def startup_preload_models():
     print(f"[STARTUP][DEBUG] diarization device: {settings.diarization_device}")
     if not torch.cuda.is_available():
         print("[STARTUP][WARN] PyTorch is CPU-only or CUDA is unavailable. STT will run on CPU.")
+    print(f"[STARTUP][DEBUG] low_vram_mode: {settings.low_vram_mode}")
+    print(f"[STARTUP][DEBUG] preload_models: {settings.preload_models}")
     print("=" * 80)
-    
+
+    stt_loaded = False
     try:
-        # 1. Preload STT (PhoWhisper)
-        print("\n [1/5] Loading Speech-to-Text (PhoWhisper)...")
+        print("\n [1/2] Loading Speech-to-Text (PhoWhisper)...")
         await run_in_threadpool(stt_service._load)
         print("       [OK] STT model loaded successfully!")
-        
+        stt_loaded = True
     except Exception as e:
         print(f"       [ERROR] STT Error: {e}")
-    try:
-        # 2. Preload Diarization (Speaker detection)
-        print("\n[2/5] Loading Diarization (Speaker Detection)...")
-        await run_in_threadpool(diarization_service._load)
-        print("       [OK] Diarization model loaded!")
-        
-    except Exception as e:
-        print(f"       [WARN] Diarization Error: {e}")
+        cleanup_temporary_gpu_memory()
+        raise RuntimeError("Failed to preload the STT model during server startup.") from e
+
+    if settings.preload_models and not settings.low_vram_mode:
+        try:
+            print("\n[2/2] Loading Diarization (Speaker Detection)...")
+            await run_in_threadpool(diarization_service._load)
+            print("       [OK] Diarization model loaded!")
+        except Exception as e:
+            print(f"       [WARN] Diarization Error: {e}")
+    elif settings.low_vram_mode:
+        print("[STARTUP] Skipping diarization preload because low_vram_mode is enabled.")
+    else:
+        print("[STARTUP] Skipping diarization preload because preload_models is disabled.")
     
+    cleanup_temporary_gpu_memory()
     print("\n" + "=" * 80)
-    print("STT and diarization preloaded in RAM. API ready for inference!")
+    if stt_loaded:
+        print("STT warmup complete. API ready for inference!")
     print("=" * 80 + "\n")
 
 
@@ -454,6 +459,65 @@ async def process_audio(
     finally:
         cleanup_temporary_gpu_memory()
         release_inference_models()
+
+
+def sse_message(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+@app.post("/api/process-stream")
+async def process_audio_stream(
+    file: Annotated[UploadFile, File(...)],
+    language: str = "vi",
+    include_diarization: bool = True,
+    expected_speakers: int | None = None,
+    translate_to: Literal["vi-en", "en-vi"] | None = None,
+    include_summary: bool = False,
+    include_llm: bool = False,
+):
+    async def event_generator():
+        queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def emit(event: str, data: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, (event, data))
+
+        try:
+            yield sse_message("status", {"stage": "upload", "message": "Saving uploaded audio"})
+            uploaded_path = await save_uploaded_audio(file)
+
+            async with app.state.inference_lock:
+                task = asyncio.create_task(
+                    run_in_threadpool(
+                        process_meeting_audio,
+                        Path(uploaded_path),
+                        language,
+                        include_diarization,
+                        expected_speakers,
+                        translate_to,
+                        include_summary,
+                        include_llm,
+                        emit,
+                    )
+                )
+
+                while True:
+                    if task.done() and queue.empty():
+                        break
+                    try:
+                        event, data = await asyncio.wait_for(queue.get(), timeout=0.25)
+                        yield sse_message(event, data)
+                    except asyncio.TimeoutError:
+                        continue
+
+                await task
+        except Exception as exc:
+            yield sse_message("error", {"message": str(exc)})
+        finally:
+            cleanup_temporary_gpu_memory()
+            release_inference_models()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/api/translate", response_model=TranslateResponse)
