@@ -50,13 +50,16 @@ class STTService:
         )
 
     def _transcribe_audio_chunk(self, audio: np.ndarray, sr: int) -> str:
+        if self._model is None or self._processor is None:
+            raise RuntimeError("STT model is not loaded. Processor or model is None.")
+
         input_features = self._prepare_input_features(audio, sr)
         with torch.no_grad():
-            generated_ids = self._model.generate( # type: ignore
+            generated_ids = self._model.generate(
                 input_features,
                 max_new_tokens=settings.stt_max_new_tokens,
             )
-        return self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0] # type: ignore
+        return self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
     def _load(self):
         if self._model is not None:

@@ -69,7 +69,13 @@ class DiarizationService:
 
         return preferred if preferred == "cuda" else "cpu"
 
-    def _speaker_profile(self, audio_path: Path) -> tuple[int, int, int]:
+    def _speaker_profile(self, audio_path: Path, expected_speakers: int | None = None) -> tuple[int, int, int]:
+        if expected_speakers is not None and expected_speakers >= 1:
+            target = expected_speakers
+            lower_bound = max(1, expected_speakers)
+            upper_bound = max(lower_bound, expected_speakers)
+            return target, lower_bound, upper_bound
+
         duration = get_audio_duration(audio_path)  # type: ignore
         floor = max(1, settings.diarization_min_speakers)
         ceiling = max(floor, settings.diarization_max_speakers)
@@ -167,11 +173,12 @@ class DiarizationService:
                 
         return self._pipeline
 
-    def diarize(self, audio_path: Path) -> DiarizationResponse:
+    def diarize(self, audio_path: Path, expected_speakers: int | None = None) -> DiarizationResponse:
         if get_audio_duration(audio_path) < settings.min_diarization_duration_seconds: # type: ignore
             return DiarizationResponse(segments=[])
 
         print(f"\n[DIARIZATION] Detecting speakers: {audio_path.name}")
+        print(f"[DIARIZATION][DEBUG] expected_speakers={expected_speakers or 'auto'}")
         
         device = self._resolve_device(audio_path)
         if device == "cpu" and settings.diarization_device == "cuda":
@@ -190,7 +197,10 @@ class DiarizationService:
             print(f"[DIARIZATION] Model unavailable - using VAD-based fallback")
             try:
                 from app.services.speaker_vad import vad_detector
-                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
+                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
+                print(
+                    f"[DIARIZATION][DEBUG] VAD fallback profile | target={target_speakers} | min={min_speakers} | max={max_speakers}"
+                )
                 result = vad_detector.detect_speakers(audio_path, num_speakers=target_speakers)
                 num_speakers = len(set(seg.speaker for seg in result.segments))
                 print(f"[DIARIZATION] VAD detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")
@@ -204,7 +214,10 @@ class DiarizationService:
         # Use real diarization model
         try:
             print(f"[DIARIZATION] Running Pyannote inference...")
-            target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
+            target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
+            print(
+                f"[DIARIZATION][DEBUG] Pyannote speaker profile | target={target_speakers} | min={min_speakers} | max={max_speakers}"
+            )
             diarization_output = pipeline(
                 read_waveform_for_pyannote(audio_path),  # type: ignore
                 min_speakers=min_speakers,
@@ -223,12 +236,13 @@ class DiarizationService:
             print(f"[DIARIZATION] Pyannote detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")
             for seg in segments:
                 print(f"  {seg.speaker}: [{seg.start}s - {seg.end}s]")
+            print(f"[DIARIZATION][DEBUG] total_segments={len(segments)}")
             return DiarizationResponse(segments=segments)
         except Exception as e:
             print(f"[DIARIZATION] Inference failed: {e} - trying VAD fallback")
             try:
                 from app.services.speaker_vad import vad_detector
-                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
+                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
                 result = vad_detector.detect_speakers(audio_path, num_speakers=target_speakers)
                 num_speakers = len(set(seg.speaker for seg in result.segments))
                 print(f"[DIARIZATION] VAD fallback detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")

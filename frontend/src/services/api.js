@@ -146,6 +146,39 @@ export const uploadService = {
     }
   },
 
+  async processAudio(
+    file,
+    language = "vi",
+    includeDiarization = true,
+    expectedSpeakers = null,
+    translateTo = null,
+    includeSummary = true,
+    includeLlm = true,
+  ) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await api.post("/api/process", formData, {
+        params: {
+          language,
+          include_diarization: includeDiarization,
+          expected_speakers: expectedSpeakers || undefined,
+          translate_to: translateTo || undefined,
+          include_summary: includeSummary,
+          include_llm: includeLlm,
+        },
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error, "Xu ly audio that bai."));
+    }
+  },
+
   async detectSpeakers(file) {
     try {
       const formData = new FormData();

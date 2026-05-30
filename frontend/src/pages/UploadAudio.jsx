@@ -39,53 +39,6 @@ const formatSpeechTime = (seconds) => {
 const formatSpeechRange = (segment) =>
   `${formatSpeechTime(segment.start)} - ${formatSpeechTime(segment.end)}`;
 
-const attachSpeakersToTranscript = (
-  transcriptSegments = [],
-  diarizationSegments = [],
-) => {
-  if (!diarizationSegments.length) {
-    return transcriptSegments.map((segment) => ({ ...segment, speaker: null }));
-  }
-
-  return transcriptSegments.map((segment) => {
-    let bestSpeaker = null;
-    let bestOverlap = 0;
-
-    diarizationSegments.forEach((diarizedSegment) => {
-      const overlapStart = Math.max(segment.start, diarizedSegment.start);
-      const overlapEnd = Math.min(segment.end, diarizedSegment.end);
-      const overlap = Math.max(0, overlapEnd - overlapStart);
-
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
-        bestSpeaker = diarizedSegment.speaker;
-      }
-    });
-
-    if (!bestSpeaker) {
-      const midpoint = (segment.start + segment.end) / 2;
-      const nearest = diarizationSegments.reduce((best, current) => {
-        if (!best) {
-          return current;
-        }
-
-        const bestDistance = Math.abs((best.start + best.end) / 2 - midpoint);
-        const currentDistance = Math.abs(
-          (current.start + current.end) / 2 - midpoint,
-        );
-        return currentDistance < bestDistance ? current : best;
-      }, null);
-
-      bestSpeaker = nearest?.speaker || null;
-    }
-
-    return {
-      ...segment,
-      speaker: bestSpeaker,
-    };
-  });
-};
-
 const transcriptToEditorText = (segments = []) =>
   segments
     .map((segment) => {
@@ -98,7 +51,11 @@ const transcriptToEditorText = (segments = []) =>
     .join("\n");
 
 const buildTranscriptText = (response) =>
-  response?.merged_text || transcriptToEditorText(response?.segments || []);
+  response?.merged_text ||
+  response?.merged_transcript ||
+  transcriptToEditorText(
+    response?.segments || response?.transcript?.segments || [],
+  );
 
 const buildSummaryView = (llmResult) => {
   const result = llmResult?.result || {};
@@ -121,6 +78,8 @@ function UploadAudio() {
   const [audioPreviewUrl, setAudioPreviewUrl] = useState("");
   const [sourceLanguage, setSourceLanguage] = useState("vi");
   const [displayLanguage, setDisplayLanguage] = useState("vi");
+  const [expectedSpeakersMode, setExpectedSpeakersMode] = useState("auto");
+  const [expectedSpeakersCount, setExpectedSpeakersCount] = useState("2");
   const [processing, setProcessing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -135,7 +94,6 @@ function UploadAudio() {
   const [llmResult, setLlmResult] = useState(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
-  const [speakerProcessing, setSpeakerProcessing] = useState(false);
 
   const transcriptSegments = transcription?.segments || [];
   const detectedSpeakers = useMemo(
@@ -146,6 +104,23 @@ function UploadAudio() {
     ],
     [transcriptSegments],
   );
+
+  const selectedExpectedSpeakers = useMemo(() => {
+    if (expectedSpeakersMode === "auto") {
+      return null;
+    }
+
+    const parsedCount = Number(expectedSpeakersCount);
+    return Number.isFinite(parsedCount) ? parsedCount : null;
+  }, [expectedSpeakersMode, expectedSpeakersCount]);
+
+  const expectedSpeakersLabel = useMemo(() => {
+    if (expectedSpeakersMode === "auto") {
+      return "Auto detect";
+    }
+
+    return `${expectedSpeakersCount} people`;
+  }, [expectedSpeakersMode, expectedSpeakersCount]);
 
   const canTranscribe = Boolean(selectedFile) && !processing;
   const canTranslate =
@@ -187,6 +162,14 @@ function UploadAudio() {
     transcriptTextareaRef.current.style.height = `${transcriptTextareaRef.current.scrollHeight}px`;
   }, [editedTranscriptText]);
 
+  useEffect(() => {
+    console.debug("[UploadAudio] diarization mode changed", {
+      expectedSpeakersMode,
+      expectedSpeakersCount,
+      selectedExpectedSpeakers,
+    });
+  }, [expectedSpeakersMode, expectedSpeakersCount, selectedExpectedSpeakers]);
+
   const helperText = useMemo(() => {
     if (!selectedFile) {
       return "Choose an audio file to begin speech-to-text.";
@@ -213,7 +196,6 @@ function UploadAudio() {
     setOriginalTranscriptText("");
     setEditedTranscriptText("");
     setTranslatedCache({});
-    setSpeakerProcessing(false);
     resetAnalysisState();
     setError("");
   };
@@ -250,13 +232,31 @@ function UploadAudio() {
     resetTranscriptState();
   };
 
+  const handleExpectedSpeakersChange = (event) => {
+    setExpectedSpeakersMode(event.target.value);
+    resetTranscriptState();
+  };
+
+  const handleExpectedSpeakersCountChange = (event) => {
+    setExpectedSpeakersCount(event.target.value);
+    resetTranscriptState();
+  };
+
   const handleTranscribe = async () => {
     if (!selectedFile) {
       return;
     }
 
+    if (
+      expectedSpeakersMode !== "auto" &&
+      (!Number.isFinite(selectedExpectedSpeakers) ||
+        selectedExpectedSpeakers < 2)
+    ) {
+      setError("Please enter a valid participant count of 2 or more.");
+      return;
+    }
+
     setProcessing(true);
-    setSpeakerProcessing(false);
     setError("");
     setTranscription(null);
     setOriginalTranscriptText("");
@@ -264,81 +264,41 @@ function UploadAudio() {
     setTranslatedCache({});
 
     try {
-      const transcriptResponse = await uploadService.transcribeAudio(
+      const processResponse = await uploadService.processAudio(
         selectedFile,
         sourceLanguage,
-        false,
+        true,
+        selectedExpectedSpeakers,
+        null,
+        true,
+        true,
       );
-      const editorText = buildTranscriptText(transcriptResponse);
+      const transcriptResponse = processResponse?.transcript || null;
+      const editorText = buildTranscriptText(processResponse);
+
       setTranscription({
-        ...transcriptResponse,
-        detected_speakers: 0,
-        assigned_speakers: 0,
-        num_speakers: 0,
+        ...(transcriptResponse || {}),
+        detected_speakers: processResponse?.detected_speakers || 0,
+        expected_speakers: processResponse?.expected_speakers ?? null,
+        assigned_speakers:
+          processResponse?.assigned_speakers ||
+          transcriptResponse?.num_speakers ||
+          0,
+        num_speakers:
+          processResponse?.num_speakers ||
+          transcriptResponse?.num_speakers ||
+          0,
+        diarization: processResponse?.diarization || null,
+        warnings:
+          processResponse?.warnings || transcriptResponse?.warnings || [],
       });
       setOriginalTranscriptText(editorText);
       setEditedTranscriptText(editorText);
       setDisplayLanguage(sourceLanguage);
       setTranslatedCache({});
       resetAnalysisState();
-
-      setSpeakerProcessing(true);
-      void uploadService
-        .detectSpeakers(selectedFile)
-        .then((diarizationResponse) => {
-          const diarizationSegments = diarizationResponse?.segments || [];
-          const transcriptSegments = transcriptResponse?.segments || [];
-          const assignedSegments = attachSpeakersToTranscript(
-            transcriptSegments,
-            diarizationSegments,
-          );
-          const detectedSpeakers = new Set(
-            diarizationSegments
-              .map((segment) => segment.speaker)
-              .filter(Boolean),
-          ).size;
-          const assignedSpeakers = new Set(
-            assignedSegments.map((segment) => segment.speaker).filter(Boolean),
-          ).size;
-          const speakerLabeledText = buildTranscriptText({
-            segments: assignedSegments,
-          });
-
-          setTranscription((current) =>
-            current
-              ? {
-                  ...current,
-                  diarization: diarizationResponse,
-                  detected_speakers: detectedSpeakers,
-                  assigned_speakers: assignedSpeakers,
-                  num_speakers: assignedSpeakers,
-                  segments: assignedSegments,
-                }
-              : current,
-          );
-
-          setOriginalTranscriptText((current) => {
-            if (current === editorText) {
-              return speakerLabeledText;
-            }
-            return current;
-          });
-          setEditedTranscriptText((current) => {
-            if (current === editorText) {
-              return speakerLabeledText;
-            }
-            return current;
-          });
-        })
-        .catch((speakerError) => {
-          setError(speakerError.message);
-        })
-        .finally(() => {
-          setSpeakerProcessing(false);
-        });
     } catch (transcribeError) {
       setError(transcribeError.message);
-      setSpeakerProcessing(false);
     } finally {
       setProcessing(false);
     }
@@ -494,6 +454,42 @@ function UploadAudio() {
 
           <div className="space-y-2">
             <span className="text-sm font-semibold text-slate-100">
+              Expected participants
+            </span>
+            <div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
+              <select
+                value={expectedSpeakersMode}
+                onChange={handleExpectedSpeakersChange}
+                className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20"
+              >
+                <option value="auto">Auto detect</option>
+                <option value="manual">Manual</option>
+              </select>
+
+              <label className="space-y-2">
+                <span className="sr-only">Participant count</span>
+                <input
+                  type="number"
+                  min="2"
+                  max="10"
+                  step="1"
+                  inputMode="numeric"
+                  value={expectedSpeakersCount}
+                  onChange={handleExpectedSpeakersCountChange}
+                  disabled={expectedSpeakersMode === "auto"}
+                  className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20 disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-slate-500"
+                  placeholder="2"
+                />
+              </label>
+            </div>
+            <p className="text-xs text-slate-400">
+              Chọn Auto detect hoặc nhập số người tham gia thực tế để
+              diarization ổn định hơn.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-sm font-semibold text-slate-100">
               Display language
             </span>
             <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
@@ -545,11 +541,32 @@ function UploadAudio() {
           <p className="text-sm font-semibold text-white">Status</p>
           <p className="mt-2 text-sm text-slate-300">{helperText}</p>
           <p className="mt-2 text-sm text-slate-300">
+            Diarization mode:{" "}
+            {expectedSpeakersMode === "auto" ? "Auto detect" : "Manual"}
+          </p>
+          <p className="mt-2 text-sm text-slate-300">
+            Selected participants: {expectedSpeakersLabel}
+          </p>
+          <p className="mt-2 text-sm text-slate-300">
             Speaker labels:{" "}
             {transcription
               ? `${transcription.detected_speakers ?? transcription.num_speakers ?? 0} detected / ${transcription.assigned_speakers ?? transcription.num_speakers ?? 0} assigned`
               : "on"}
           </p>
+          {transcription?.expected_speakers ? (
+            <p className="mt-2 text-sm text-slate-300">
+              Expected participants: {transcription.expected_speakers}
+            </p>
+          ) : (
+            <p className="mt-2 text-sm text-slate-300">
+              Expected participants: Auto detect
+            </p>
+          )}
+          {expectedSpeakersMode !== "auto" && !selectedExpectedSpeakers ? (
+            <p className="mt-2 text-sm text-rose-200">
+              Manual mode is selected but the participant count is invalid.
+            </p>
+          ) : null}
           {detectedSpeakers.length ? (
             <p className="mt-2 text-sm text-slate-300">
               Detected speakers: {detectedSpeakers.join(", ")}
@@ -565,11 +582,6 @@ function UploadAudio() {
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
             Display language: {displayLanguageLabels[displayLanguage]}
           </p>
-          {speakerProcessing ? (
-            <p className="mt-2 text-sm text-accent-200">
-              Transcript is ready. Detecting speakers in the background...
-            </p>
-          ) : null}
         </div>
 
         <button

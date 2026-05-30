@@ -102,7 +102,7 @@ app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "app" / "static"), nam
 async def startup_preload_models():
     """Preload all models at startup for faster inference."""
     print("\n" + "=" * 80)
-    print("🚀 STARTUP: Preloading models into RAM...")
+    print("STARTUP: Preloading models into RAM...")
     print(f"[STARTUP][DEBUG] torch.cuda.is_available(): {torch.cuda.is_available()}")
     print(f"[STARTUP][DEBUG] torch.version.cuda: {getattr(getattr(torch, 'version', None), 'cuda', None)}")
     print(f"[STARTUP][DEBUG] torch build: {torch.__version__}")
@@ -117,21 +117,21 @@ async def startup_preload_models():
         # 1. Preload STT (PhoWhisper)
         print("\n [1/5] Loading Speech-to-Text (PhoWhisper)...")
         await run_in_threadpool(stt_service._load)
-        print("       ✅ STT model loaded successfully!")
+        print("       [OK] STT model loaded successfully!")
         
     except Exception as e:
-        print(f"       ❌ STT Error: {e}")
+        print(f"       [ERROR] STT Error: {e}")
     try:
         # 2. Preload Diarization (Speaker detection)
-        print("\n👥 [2/5] Loading Diarization (Speaker Detection)...")
+        print("\n[2/5] Loading Diarization (Speaker Detection)...")
         await run_in_threadpool(diarization_service._load)
-        print("       ✅ Diarization model loaded!")
+        print("       [OK] Diarization model loaded!")
         
     except Exception as e:
-        print(f"       ⚠️  Diarization Error: {e}")
+        print(f"       [WARN] Diarization Error: {e}")
     
     print("\n" + "=" * 80)
-    print("✨ STT and diarization preloaded in RAM. API ready for inference!")
+    print("STT and diarization preloaded in RAM. API ready for inference!")
     print("=" * 80 + "\n")
 
 
@@ -154,6 +154,7 @@ async def transcribe_audio_core(
     file: UploadFile,
     language: str,
     include_speakers: bool = False,
+    expected_speakers: int | None = None,
 ) -> tuple[TranscriptionResponse, DiarizationResponse | None, int, int, list[str]]:
     warnings: list[str] = []
     try:
@@ -166,12 +167,16 @@ async def transcribe_audio_core(
         num_speakers = 0
         if include_speakers:
             try:
+                print(
+                    f"[API][DEBUG] Speaker mode enabled | expected_speakers={expected_speakers or 'auto'} | "
+                    f"stt_device={settings.resolved_stt_device} | diarization_device={settings.diarization_device}"
+                )
                 if settings.resolved_stt_device == "cuda" and settings.diarization_device == "cuda":
                     print("[API][DEBUG] Releasing STT GPU memory before diarization to maximize available VRAM.")
                     stt_service.unload()
                     cleanup_temporary_gpu_memory()
 
-                diarization = await run_in_threadpool(diarization_service.diarize, normalized_path)
+                diarization = await run_in_threadpool(diarization_service.diarize, normalized_path, expected_speakers)
                 detected_speakers = len({segment.speaker for segment in diarization.segments if segment.speaker})
                 transcript = transcript.model_copy(
                     update={"segments": attach_speakers(transcript.segments, diarization.segments)}
@@ -343,6 +348,10 @@ async def transcribe_audio(
 async def transcribe_with_speakers(
     file: Annotated[UploadFile, File(...)],
     language: Annotated[str, Query(description="Language hint for faster-whisper.")] = "vi",
+    expected_speakers: Annotated[
+        int | None,
+        Query(description="Expected number of participants in the meeting."),
+    ] = None,
 ) -> TranscribeWithSpeakersResponse:
     """Transcribe audio with speaker identification (diarization).
     
@@ -353,11 +362,17 @@ async def transcribe_with_speakers(
             print(f"\n{'='*80}")
             print(f"[API] /api/transcribe-with-speakers request")
             print(f"[API] File: {file.filename}, Language: {language}")
+            print(f"[API][DEBUG] expected_speakers: {expected_speakers or 'auto'}")
             print(f"[API][DEBUG] STT resolved device: {settings.resolved_stt_device}")
             print(f"[API][DEBUG] STT compute type: {settings.resolved_stt_compute_type}")
             print(f"{'='*80}")
             
-            transcript, diarization, detected_speakers, num_speakers, warnings = await transcribe_audio_core(file, language, True)
+            transcript, diarization, detected_speakers, num_speakers, warnings = await transcribe_audio_core(
+                file,
+                language,
+                True,
+                expected_speakers,
+            )
         print(f"[API] STT completed - {len(transcript.text)} chars")
         transcript_with_speakers = transcript
 
@@ -410,17 +425,24 @@ async def process_audio(
     file: Annotated[UploadFile, File(...)],
     language: str = "vi",
     include_diarization: bool = True,
+    expected_speakers: int | None = None,
     translate_to: Literal["vi-en", "en-vi"] | None = None,
     include_summary: bool = True,
     include_llm: bool = True,
 ) -> ProcessResponse:
     try:
+        print(
+            f"[API] /api/process request | file={file.filename} | language={language} | "
+            f"include_diarization={include_diarization} | expected_speakers={expected_speakers or 'auto'} | "
+            f"translate_to={translate_to or 'none'} | include_summary={include_summary} | include_llm={include_llm}"
+        )
         uploaded_path = await save_uploaded_audio(file)
         return await run_in_threadpool(
             process_meeting_audio,
             Path(uploaded_path),
             language,
             include_diarization,
+            expected_speakers,
             translate_to,
             include_summary,
             include_llm,
