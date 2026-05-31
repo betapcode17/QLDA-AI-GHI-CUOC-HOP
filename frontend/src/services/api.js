@@ -67,6 +67,20 @@ export const meetingService = {
     return response.data;
   },
 
+  async translateTranscript(transcriptId, direction = "vi-en") {
+    const response = await api.post(`/transcripts/${transcriptId}/translate`, {
+      direction,
+    });
+    return response.data;
+  },
+
+  async batchTranslateTranscripts(meetingId, direction = "vi-en") {
+    const response = await api.post(`/meetings/${meetingId}/transcripts/batch-translate`, {
+      direction,
+    });
+    return response.data;
+  },
+
   async getSummaries(meetingId) {
     const response = await api.get(`/meetings/${meetingId}/summaries`);
     return response.data;

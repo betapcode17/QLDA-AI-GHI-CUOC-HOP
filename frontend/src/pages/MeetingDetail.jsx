@@ -23,6 +23,7 @@ function MeetingDetail() {
   const [qaQuestion, setQaQuestion] = useState("");
   const [qaAnswer, setQaAnswer] = useState(null);
   const [qaLoading, setQaLoading] = useState(false);
+  const [translatingTranscripts, setTranslatingTranscripts] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -119,6 +120,23 @@ function MeetingDetail() {
     }
   };
 
+  const handleTranslateTranscripts = async (direction) => {
+    if (!related.transcripts.length) return;
+
+    setTranslatingTranscripts(true);
+    setError("");
+    try {
+      await meetingService.batchTranslateTranscripts(id, direction);
+      const transcripts = await meetingService.getTranscripts(id);
+      setRelated((current) => ({ ...current, transcripts }));
+      setActiveTab("Transcript");
+    } catch (translateError) {
+      setError(translateError.message || "Could not translate meeting transcripts.");
+    } finally {
+      setTranslatingTranscripts(false);
+    }
+  };
+
   if (loading) return <LoadingState cards={2} />;
 
   if (error || !meeting) {
@@ -177,6 +195,34 @@ function MeetingDetail() {
       <section className="rounded-[24px] border border-white/10 bg-slate-950/70 p-6 shadow-panel">
         {activeTab === "Transcript" ? (
           <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">
+                  Transcript translation
+                </p>
+                <p className="mt-1 text-sm text-slate-400">
+                  Translate saved transcript segments with the local English/Vietnamese models.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleTranslateTranscripts("vi-en")}
+                  disabled={translatingTranscripts || !related.transcripts.length}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-accent-300 disabled:cursor-not-allowed disabled:text-slate-500"
+                >
+                  {translatingTranscripts ? "Translating..." : "VI to EN"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTranslateTranscripts("en-vi")}
+                  disabled={translatingTranscripts || !related.transcripts.length}
+                  className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-accent-300 disabled:cursor-not-allowed disabled:text-slate-500"
+                >
+                  {translatingTranscripts ? "Translating..." : "EN to VI"}
+                </button>
+              </div>
+            </div>
             {related.transcripts.map((item) => (
               <article key={item.id} className="rounded-2xl bg-white/5 p-4">
                 <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.14em] text-slate-400">
