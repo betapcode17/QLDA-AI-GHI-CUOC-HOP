@@ -1,0 +1,46 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      API_BASE_URL: http://localhost:3001
+      FRONTEND_ORIGIN: http://localhost:5173
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://postgres:17122005@host.docker.internal:5432/ai_meeting_assistant?schema=public}
+      JWT_ACCESS_SECRET: docker_change_me_access_secret
+      JWT_REFRESH_SECRET: docker_change_me_refresh_secret
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      BCRYPT_ROUNDS: 12
+      UPLOAD_DIR: uploads
+      MAX_UPLOAD_MB: 500
+      AI_SERVICE_URL: ${DOCKER_AI_SERVICE_URL:-http://host.docker.internal:8000}
+      RATE_LIMIT_WINDOW_MS: 900000
+      RATE_LIMIT_MAX: 300
+      AUTH_DISABLED: "true"
+    ports:
+      - "3001:3001"
+    volumes:
+      - backend-uploads:/app/uploads
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:3001
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  backend-uploads:

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+transformers
+sentencepiece
+sacremoses
+accelerate
+librosa
+pydub
+soundfile
+faster-whisper
+pyannote.audio==3.3.2
+huggingface_hub
+chromadb
