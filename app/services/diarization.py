@@ -7,6 +7,7 @@ import warnings
 from app.config import settings
 from app.schemas import DiarizationResponse, DiarizationSegment, TranscriptSegment
 from app.services.audio import read_waveform_for_pyannote
+from app.services.gpu_memory import log_cuda_memory, release_cuda_memory
 from app.services.stt import get_audio_duration # type: ignore
 
 
@@ -17,19 +18,17 @@ class DiarizationService:
         self._lock = Lock()
 
     def unload(self) -> None:
+        if self._pipeline is not None:
+            try:
+                import torch
+
+                self._pipeline.to(torch.device("cpu"))
+            except Exception:
+                pass
+        del self._pipeline
         self._pipeline = None
         self._pipeline_device = None
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                try:
-                    torch.cuda.ipc_collect()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        release_cuda_memory("after diarization unload")
 
     def _gpu_memory_mb(self) -> tuple[int, int]:
         try:
@@ -59,7 +58,17 @@ class DiarizationService:
             return "cpu"
 
         free_memory_mb, total_memory_mb = self._gpu_memory_mb()
-        if free_memory_mb and free_memory_mb <= settings.diarization_gpu_memory_limit_mb:
+        gpu_memory_limit_mb = settings.diarization_gpu_memory_limit_mb
+        if total_memory_mb:
+            # Tune the cutoff to the actual card size. On small cards, use a more
+            # conservative threshold so we do not keep trying GPU when VRAM is
+            # already fragmented or nearly full.
+            ratio = float(getattr(settings, "diarization_gpu_cutoff_ratio", 0.20))
+            floor_mb = int(getattr(settings, "diarization_gpu_cutoff_floor_mb", 700))
+            adaptive_limit_mb = max(floor_mb, int(total_memory_mb * ratio))
+            gpu_memory_limit_mb = min(gpu_memory_limit_mb, adaptive_limit_mb)
+
+        if free_memory_mb and free_memory_mb <= gpu_memory_limit_mb:
             return "cpu"
 
         if audio_path is not None:
@@ -69,7 +78,26 @@ class DiarizationService:
 
         return preferred if preferred == "cuda" else "cpu"
 
-    def _speaker_profile(self, audio_path: Path) -> tuple[int, int, int]:
+    def _diagnostic_gpu_limit_mb(self) -> tuple[int, int, int]:
+        free_memory_mb, total_memory_mb = self._gpu_memory_mb()
+        configured_limit_mb = settings.diarization_gpu_memory_limit_mb
+        adaptive_limit_mb = configured_limit_mb
+
+        if total_memory_mb:
+            ratio = float(getattr(settings, "diarization_gpu_cutoff_ratio", 0.35))
+            floor_mb = int(getattr(settings, "diarization_gpu_cutoff_floor_mb", 1200))
+            adaptive_limit_mb = max(floor_mb, int(total_memory_mb * ratio))
+            configured_limit_mb = min(configured_limit_mb, adaptive_limit_mb)
+
+        return free_memory_mb, total_memory_mb, configured_limit_mb
+
+    def _speaker_profile(self, audio_path: Path, expected_speakers: int | None = None) -> tuple[int, int, int]:
+        if expected_speakers is not None and expected_speakers >= 1:
+            target = expected_speakers
+            lower_bound = max(1, expected_speakers)
+            upper_bound = max(lower_bound, expected_speakers)
+            return target, lower_bound, upper_bound
+
         duration = get_audio_duration(audio_path)  # type: ignore
         floor = max(1, settings.diarization_min_speakers)
         ceiling = max(floor, settings.diarization_max_speakers)
@@ -136,6 +164,7 @@ class DiarizationService:
                     return self._pipeline
 
                 print(f"[DIARIZATION] Loading Pyannote speaker-diarization from local bundle: {local_model_dir}")
+                log_cuda_memory("before diarization load")
 
                 try:
                     original_torch_load = torch.load
@@ -164,23 +193,57 @@ class DiarizationService:
                 self._pipeline = pipeline
                 self._pipeline_device = desired_device
                 print(f"[DIARIZATION] Pipeline loaded successfully on {desired_device}") # type: ignore
+                log_cuda_memory("after diarization load")
                 
         return self._pipeline
 
-    def diarize(self, audio_path: Path) -> DiarizationResponse:
+    def diarize(self, audio_path: Path, expected_speakers: int | None = None) -> DiarizationResponse:
         if get_audio_duration(audio_path) < settings.min_diarization_duration_seconds: # type: ignore
             return DiarizationResponse(segments=[])
 
+        if (
+            settings.skip_diarization_when_single_speaker
+            and expected_speakers is not None
+            and expected_speakers <= 1
+        ):
+            duration = get_audio_duration(audio_path)
+            print(
+                "[DIARIZATION] Skipping diarization because expected_speakers=1; "
+                "assigning the whole file to SPEAKER_00."
+            )
+            return DiarizationResponse(
+                segments=[
+                    DiarizationSegment(
+                        start=0.0,
+                        end=round(float(duration), 3),
+                        speaker="SPEAKER_00",
+                    )
+                ]
+            )
+
         print(f"\n[DIARIZATION] Detecting speakers: {audio_path.name}")
+        print(f"[DIARIZATION][DEBUG] expected_speakers={expected_speakers or 'auto'}")
         
         device = self._resolve_device(audio_path)
+        free_memory_mb, total_memory_mb, effective_limit_mb = self._diagnostic_gpu_limit_mb()
+        ratio = float(getattr(settings, "diarization_gpu_cutoff_ratio", 0.35))
+        floor_mb = int(getattr(settings, "diarization_gpu_cutoff_floor_mb", 1200))
+        duration = get_audio_duration(audio_path)
+        print(
+            f"[DIARIZATION][DEBUG] gpu_free={free_memory_mb}MB | gpu_total={total_memory_mb}MB | "
+            f"configured_limit={settings.diarization_gpu_memory_limit_mb}MB | ratio={ratio:.2f} | floor={floor_mb}MB | "
+            f"effective_limit={effective_limit_mb}MB | audio_duration={duration:.1f}s"
+        )
         if device == "cpu" and settings.diarization_device == "cuda":
-            free_memory_mb, total_memory_mb = self._gpu_memory_mb()
+            reason = "GPU memory below effective limit"
+            if free_memory_mb == 0:
+                reason = "CUDA memory info unavailable"
+            elif duration >= settings.diarization_cpu_after_seconds and free_memory_mb == 0:
+                reason = f"audio length >= {settings.diarization_cpu_after_seconds}s and no GPU free memory"
             print(
-                f"[DIARIZATION] Using CPU for this request (free GPU memory {free_memory_mb}MB / {total_memory_mb}MB total, threshold {settings.diarization_gpu_memory_limit_mb}MB, or audio too long)."
+                f"[DIARIZATION] Using CPU for this request ({reason}; free GPU memory {free_memory_mb}MB / {total_memory_mb}MB total, threshold {effective_limit_mb}MB)."
             )
         elif device == "cuda":
-            free_memory_mb, total_memory_mb = self._gpu_memory_mb()
             print(f"[DIARIZATION] Using GPU for this request (free GPU memory {free_memory_mb}MB / {total_memory_mb}MB total).")
 
         pipeline = self._load(device)
@@ -190,7 +253,10 @@ class DiarizationService:
             print(f"[DIARIZATION] Model unavailable - using VAD-based fallback")
             try:
                 from app.services.speaker_vad import vad_detector
-                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
+                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
+                print(
+                    f"[DIARIZATION][DEBUG] VAD fallback profile | target={target_speakers} | min={min_speakers} | max={max_speakers}"
+                )
                 result = vad_detector.detect_speakers(audio_path, num_speakers=target_speakers)
                 num_speakers = len(set(seg.speaker for seg in result.segments))
                 print(f"[DIARIZATION] VAD detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")
@@ -204,12 +270,23 @@ class DiarizationService:
         # Use real diarization model
         try:
             print(f"[DIARIZATION] Running Pyannote inference...")
-            target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
-            diarization_output = pipeline(
-                read_waveform_for_pyannote(audio_path),  # type: ignore
-                min_speakers=min_speakers,
-                max_speakers=max_speakers,
+            target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
+            print(
+                f"[DIARIZATION][DEBUG] Pyannote speaker profile | target={target_speakers} | min={min_speakers} | max={max_speakers}"
             )
+            waveform = read_waveform_for_pyannote(audio_path)
+            if expected_speakers is not None and expected_speakers >= 1:
+                print(f"[DIARIZATION] Fast path: using fixed num_speakers={target_speakers}")
+                diarization_output = pipeline(
+                    waveform,  # type: ignore
+                    num_speakers=target_speakers,
+                )
+            else:
+                diarization_output = pipeline(
+                    waveform,  # type: ignore
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
             diarization = extract_annotation(diarization_output)
             segments = [
                 DiarizationSegment(
@@ -223,12 +300,15 @@ class DiarizationService:
             print(f"[DIARIZATION] Pyannote detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")
             for seg in segments:
                 print(f"  {seg.speaker}: [{seg.start}s - {seg.end}s]")
+            print(f"[DIARIZATION][DEBUG] total_segments={len(segments)}")
+            if settings.low_vram_mode:
+                release_cuda_memory("after diarization inference")
             return DiarizationResponse(segments=segments)
         except Exception as e:
             print(f"[DIARIZATION] Inference failed: {e} - trying VAD fallback")
             try:
                 from app.services.speaker_vad import vad_detector
-                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path)
+                target_speakers, min_speakers, max_speakers = self._speaker_profile(audio_path, expected_speakers)
                 result = vad_detector.detect_speakers(audio_path, num_speakers=target_speakers)
                 num_speakers = len(set(seg.speaker for seg in result.segments))
                 print(f"[DIARIZATION] VAD fallback detected {num_speakers} speakers (target {target_speakers}, range {min_speakers}-{max_speakers}):")

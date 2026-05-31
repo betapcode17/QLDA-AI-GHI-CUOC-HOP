@@ -69,6 +69,8 @@ def normalize_audio(input_path: Path) -> Path:
         "-y",
         "-i",
         str(input_path),
+        "-af",
+        "highpass=f=80,lowpass=f=7800,afftdn,dynaudnorm=f=150:g=12",
         "-ac",
         "1",
         "-ar",
@@ -76,7 +78,14 @@ def normalize_audio(input_path: Path) -> Path:
         "-vn",
         str(output_path),
     ]
-    completed = subprocess.run(command, cwd=PROJECT_ROOT, capture_output=True, text=True)
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if completed.returncode != 0:
         raise RuntimeError(f"ffmpeg failed to normalize audio: {completed.stderr.strip()}")
     return output_path
@@ -89,3 +98,45 @@ def read_waveform_for_pyannote(audio_path: Path):
     mono = samples.mean(axis=1)
     waveform = torch.from_numpy(mono).unsqueeze(0)
     return {"waveform": waveform, "sample_rate": sample_rate}
+
+
+def extract_segment_to_file(audio_path: Path, start: float, end: float, output_path: Path | None = None) -> Path:
+    """Extract a time segment [start, end] (seconds) from `audio_path` into a 16k mono wav file.
+
+    Uses ffmpeg for accurate segment trimming. Returns the path to the output wav file.
+    """
+    ffmpeg = find_ffmpeg()
+    settings.processed_dir.mkdir(parents=True, exist_ok=True)
+    if output_path is None:
+        # name based on original + start-end
+        output_path = settings.processed_dir / f"{audio_path.stem}_{int(start*1000)}_{int(end*1000)}_seg.wav"
+
+    # build ffmpeg command: seek then copy segment
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(audio_path),
+        "-ss",
+        str(start),
+        "-to",
+        str(end),
+        "-ac",
+        "1",
+        "-ar",
+        str(settings.audio_sample_rate),
+        "-vn",
+        str(output_path),
+    ]
+    # run
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed to extract segment: {completed.stderr.strip()}")
+    return output_path

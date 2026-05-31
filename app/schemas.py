@@ -145,6 +145,10 @@ class STTHealthResponse(BaseModel):
 class ProcessResponse(BaseModel):
     transcript: TranscriptionResponse
     diarization: DiarizationResponse | None = None
+    expected_speakers: int | None = None
+    detected_speakers: int = 0
+    assigned_speakers: int = 0
+    num_speakers: int = 0
     merged_transcript: str
     translated_transcript: str | None = None
     translated_text: str | None = None

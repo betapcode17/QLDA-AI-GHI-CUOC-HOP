@@ -10,6 +10,7 @@ import torch
 
 from app.config import settings
 from app.schemas import TranscriptSegment, TranscriptionResponse
+from app.services.gpu_memory import log_cuda_memory, release_cuda_memory
 from app.services.text_quality import normalize_microphone_check_text
 
 
@@ -24,14 +25,16 @@ class STTService:
         self._lock = Lock()
 
     def unload(self) -> None:
-        self._model = None
-        self._processor = None
-        if torch.cuda.is_available():
+        if self._model is not None:
             try:
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
+                self._model.to("cpu")
             except Exception:
                 pass
+        del self._model
+        del self._processor
+        self._model = None
+        self._processor = None
+        release_cuda_memory("after STT unload")
 
     def _prepare_input_features(self, audio: np.ndarray, sr: int) -> torch.Tensor:
         feature_extractor = self._processor.feature_extractor # type: ignore
@@ -50,13 +53,25 @@ class STTService:
         )
 
     def _transcribe_audio_chunk(self, audio: np.ndarray, sr: int) -> str:
+        if self._model is None or self._processor is None:
+            raise RuntimeError("STT model is not loaded. Processor or model is None.")
+
         input_features = self._prepare_input_features(audio, sr)
-        with torch.no_grad():
-            generated_ids = self._model.generate( # type: ignore
-                input_features,
-                max_new_tokens=settings.stt_max_new_tokens,
-            )
-        return self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0] # type: ignore
+        try:
+            with torch.inference_mode():
+                generated_ids = self._model.generate(
+                    input_features,
+                    max_new_tokens=settings.stt_max_new_tokens,
+                )
+            return self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        finally:
+            try:
+                del generated_ids
+            except Exception:
+                pass
+            del input_features
+            if settings.low_vram_mode:
+                release_cuda_memory("after STT chunk")
 
     def _load(self):
         if self._model is not None:
@@ -78,6 +93,7 @@ class STTService:
                     )
                 
                 print("[STT] Loading model...")
+                log_cuda_memory("before STT load")
 
                 cuda_available = torch.cuda.is_available()
                 stt_device = settings.resolved_stt_device
@@ -101,6 +117,7 @@ class STTService:
 
                 model_device = next(self._model.parameters()).device
                 print(f"[STT] Model on {model_device}")
+                log_cuda_memory("after STT load")
 
                 if device == "cpu":
                     cpu_threads = max(1, settings.stt_cpu_threads)
@@ -179,7 +196,7 @@ class STTService:
                             text=cleaned_chunk_text,
                         )
                     )
-                chunk_texts.append(chunk_text.strip())
+                    chunk_texts.append(cleaned_chunk_text)
 
             chunk_index += 1
 
@@ -199,6 +216,8 @@ class STTService:
                 ]
 
         print(f"[STT] Done: {len(text)} chars\n")
+        if settings.low_vram_mode:
+            release_cuda_memory("after STT request")
         return TranscriptionResponse(language=language or settings.default_language, language_probability=None, segments=segments, text=text)
 
     def _transcribe_with_pipeline(self, audio, sr: int, language: str | None, audio_path: Path) -> TranscriptionResponse: # type: ignore

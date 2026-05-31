@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import LoadingState from '../components/LoadingState';
 import MeetingCard from '../components/MeetingCard';
 import { meetingService } from '../services/api';
@@ -48,7 +49,7 @@ function MeetingsList() {
               Review previous calls, reopen summaries, and inspect decisions captured during each meeting.
             </p>
           </div>
-          <div className="w-full max-w-md">
+          <div className="flex w-full max-w-md flex-col gap-3">
             <input
               type="search"
               value={search}
@@ -56,6 +57,12 @@ function MeetingsList() {
               placeholder="Search by title, source, or status"
               className="w-full rounded-full border border-white/10 bg-white/5 px-5 py-3 text-sm text-slate-200 outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20"
             />
+            <Link
+              to="/meetings/new"
+              className="inline-flex justify-center rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-600"
+            >
+              Create meeting
+            </Link>
           </div>
         </div>
       </section>

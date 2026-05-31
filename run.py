@@ -19,7 +19,34 @@ import time
 import argparse
 import socket
 from pathlib import Path
-import torch
+
+
+def relaunch_with_project_venv() -> None:
+    """Prefer the project virtualenv when users run plain `python run.py`.
+
+    On Windows, `python` often points to the Microsoft Store interpreter while
+    the project dependencies live in `.venv`. Re-exec early so torch, pyannote,
+    and transformers are imported from the environment that actually has them.
+    """
+    project_root = Path(__file__).resolve().parent
+    venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        return
+
+    try:
+        current = Path(sys.executable).resolve()
+        target = venv_python.resolve()
+    except OSError:
+        return
+
+    if current == target:
+        return
+
+    print(f"[INFO] Re-launching with project virtualenv: {target}")
+    os.execv(str(target), [str(target), *sys.argv])
+
+
+relaunch_with_project_venv()
 
 
 def configure_console_encoding() -> None:
@@ -32,6 +59,22 @@ def configure_console_encoding() -> None:
 
 
 configure_console_encoding()
+
+
+def configure_runtime_environment() -> None:
+    """Set runtime defaults before importing CUDA-sensitive libraries."""
+    os.environ.setdefault("DIARIZATION_DEVICE", "cuda")
+    os.environ.setdefault("DIARIZATION_GPU_MEMORY_LIMIT_MB", "900")
+    os.environ.setdefault("DIARIZATION_GPU_CUTOFF_RATIO", "0.20")
+    os.environ.setdefault("DIARIZATION_GPU_CUTOFF_FLOOR_MB", "700")
+    os.environ.setdefault("AI_LOW_VRAM_MODE", "1")
+    os.environ.setdefault("PRELOAD_MODELS", "0")
+    os.environ.setdefault("STT_CHUNK_DURATION", "15")
+    os.environ.setdefault("STT_MAX_NEW_TOKENS", "256")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64,garbage_collection_threshold:0.8")
+
+
+configure_runtime_environment()
 
 
 class Colors:
@@ -67,6 +110,8 @@ def print_info(text: str):
 
 def check_runtime_device():
     """Show whether the Python environment can use CUDA."""
+    import torch
+
     print_info("Checking runtime device...")
     try:
         if torch.cuda.is_available():

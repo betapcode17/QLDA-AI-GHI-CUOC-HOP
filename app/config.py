@@ -8,9 +8,16 @@ import torch
 # Load .env file if it exists
 try:
     from dotenv import load_dotenv # pyright: ignore[reportMissingImports]
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
-    pass  # python-dotenv not required
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if env_path.exists():
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = PROJECT_ROOT / "models"
@@ -49,10 +56,30 @@ def configure_local_environment() -> None:
     # Transformers & HF Hub settings
     os.environ.setdefault("TRANSFORMERS_NO_TORCHCODEC", "1")
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("AI_LOW_VRAM_MODE", "1")
+    os.environ.setdefault("PRELOAD_MODELS", "0")
+
+    # Diarization defaults: on 4GB GPUs, run diarization and STT sequentially
+    # and aggressively release whichever model just finished.
+    os.environ.setdefault("DIARIZATION_DEVICE", "cuda")
+    # GPU memory threshold for diarization. If free GPU memory is <= this value,
+    # the code will prefer CPU to avoid CUDA OOM. Set to a sensible default
+    # (e.g. 1500 MB) rather than 0 to prevent attempting GPU when memory is low.
+    os.environ.setdefault("DIARIZATION_GPU_MEMORY_LIMIT_MB", "900")
+    # Adaptive cutoff controls used by diarization.py to derive the effective
+    # GPU threshold from the card size. The effective cutoff becomes the lower
+    # of the configured limit and the adaptive value below.
+    os.environ.setdefault("DIARIZATION_GPU_CUTOFF_RATIO", "0.20")
+    os.environ.setdefault("DIARIZATION_GPU_CUTOFF_FLOOR_MB", "700")
+    # PyTorch CUDA allocation configuration to reduce fragmentation OOMs.
+    # Setting `max_split_size_mb` prevents very small allocations from fragmenting
+    # the GPU heap; 64 is conservative for 4GB cards.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64,garbage_collection_threshold:0.8")
+    # Default max speakers to a reasonable upper bound (can be tuned per-run)
+    os.environ.setdefault("DIARIZATION_MAX_SPEAKERS", "4")
 
     # Runtime device preferences
     os.environ.setdefault("MODEL_DEVICE", "auto")
-    os.environ.setdefault("DIARIZATION_DEVICE", "auto")
     os.environ.setdefault("STT_DEVICE", "cuda")
     os.environ.setdefault("STT_COMPUTE_TYPE", "auto")
     os.environ.setdefault("STT_CPU_THREADS", str(min(8, os.cpu_count() or 4)))
@@ -83,14 +110,22 @@ class Settings:
         "kết luận, rủi ro, tiến độ"
     )
     stt_vad_min_duration_seconds: float = 8.0
-    stt_max_new_tokens: int = int(os.environ.get("STT_MAX_NEW_TOKENS", "440"))
-    stt_chunk_duration_seconds: int = int(os.environ.get("STT_CHUNK_DURATION", "30"))
+    stt_max_new_tokens: int = int(os.environ.get("STT_MAX_NEW_TOKENS", "256"))
+    stt_chunk_duration_seconds: int = int(os.environ.get("STT_CHUNK_DURATION", "15"))
+    stt_min_segment_seconds: float = float(os.environ.get("STT_MIN_SEGMENT_SECONDS", "1.0"))
+    low_vram_mode: bool = os.environ.get("AI_LOW_VRAM_MODE", "1").lower() in {"1", "true", "yes", "on"}
+    preload_models: bool = os.environ.get("PRELOAD_MODELS", "0").lower() in {"1", "true", "yes", "on"}
     min_diarization_duration_seconds: float = 8.0
+    skip_diarization_when_single_speaker: bool = os.environ.get(
+        "SKIP_DIARIZATION_WHEN_SINGLE_SPEAKER",
+        "1",
+    ).lower() in {"1", "true", "yes", "on"}
     audio_sample_rate: int = 16000
     diarization_cluster_threshold: float = float(os.environ.get("DIARIZATION_CLUSTER_THRESHOLD", "0.48"))
     diarization_cluster_fa: float = float(os.environ.get("DIARIZATION_CLUSTER_FA", "0.07"))
     diarization_cluster_fb: float = float(os.environ.get("DIARIZATION_CLUSTER_FB", "0.8"))
     diarization_min_duration_off: float = float(os.environ.get("DIARIZATION_MIN_DURATION_OFF", "0.0"))
+    diarization_merge_gap_seconds: float = float(os.environ.get("DIARIZATION_MERGE_GAP_SECONDS", "0.35"))
     diarization_min_speakers: int = max(1, int(os.environ.get("DIARIZATION_MIN_SPEAKERS", "1")))
     diarization_max_speakers: int = max(
         max(1, int(os.environ.get("DIARIZATION_MIN_SPEAKERS", "1"))),
@@ -105,6 +140,11 @@ class Settings:
     diarization_gpu_memory_limit_mb: int = max(
         0,
         int(os.environ.get("DIARIZATION_GPU_MEMORY_LIMIT_MB", "1500")),
+    )
+    diarization_gpu_cutoff_ratio: float = float(os.environ.get("DIARIZATION_GPU_CUTOFF_RATIO", "0.30"))
+    diarization_gpu_cutoff_floor_mb: int = max(
+        0,
+        int(os.environ.get("DIARIZATION_GPU_CUTOFF_FLOOR_MB", "1000")),
     )
     
     # Directories

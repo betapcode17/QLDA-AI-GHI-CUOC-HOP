@@ -6,6 +6,7 @@ const items = [
   { label: 'Recording', to: '/recording' },
   { label: 'Upload Audio', to: '/upload-audio' },
   { label: 'Meetings', to: '/meetings' },
+  { label: 'Action Items', to: '/action-items' },
   { label: 'Settings', to: '/settings' },
 ];
 

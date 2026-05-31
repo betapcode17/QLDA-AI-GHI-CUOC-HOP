@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { uploadService } from "../services/api";
+import { Link } from "react-router-dom";
+import { meetingService, uploadService } from "../services/api";
 
 const displayLanguageLabels = {
   en: "English",
   vi: "Vietnamese",
 };
-
 const sourceLanguageLabels = {
   en: "English audio",
   vi: "Vietnamese audio",
@@ -39,53 +39,6 @@ const formatSpeechTime = (seconds) => {
 const formatSpeechRange = (segment) =>
   `${formatSpeechTime(segment.start)} - ${formatSpeechTime(segment.end)}`;
 
-const attachSpeakersToTranscript = (
-  transcriptSegments = [],
-  diarizationSegments = [],
-) => {
-  if (!diarizationSegments.length) {
-    return transcriptSegments.map((segment) => ({ ...segment, speaker: null }));
-  }
-
-  return transcriptSegments.map((segment) => {
-    let bestSpeaker = null;
-    let bestOverlap = 0;
-
-    diarizationSegments.forEach((diarizedSegment) => {
-      const overlapStart = Math.max(segment.start, diarizedSegment.start);
-      const overlapEnd = Math.min(segment.end, diarizedSegment.end);
-      const overlap = Math.max(0, overlapEnd - overlapStart);
-
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
-        bestSpeaker = diarizedSegment.speaker;
-      }
-    });
-
-    if (!bestSpeaker) {
-      const midpoint = (segment.start + segment.end) / 2;
-      const nearest = diarizationSegments.reduce((best, current) => {
-        if (!best) {
-          return current;
-        }
-
-        const bestDistance = Math.abs((best.start + best.end) / 2 - midpoint);
-        const currentDistance = Math.abs(
-          (current.start + current.end) / 2 - midpoint,
-        );
-        return currentDistance < bestDistance ? current : best;
-      }, null);
-
-      bestSpeaker = nearest?.speaker || null;
-    }
-
-    return {
-      ...segment,
-      speaker: bestSpeaker,
-    };
-  });
-};
-
 const transcriptToEditorText = (segments = []) =>
   segments
     .map((segment) => {
@@ -97,8 +50,28 @@ const transcriptToEditorText = (segments = []) =>
     })
     .join("\n");
 
-const buildTranscriptText = (response) =>
-  response?.merged_text || transcriptToEditorText(response?.segments || []);
+const buildTranscriptText = (response, preferSegments = false) => {
+  const segmentText = transcriptToEditorText(
+    response?.segments || response?.transcript?.segments || [],
+  );
+
+  if (preferSegments) {
+    return (
+      segmentText ||
+      response?.text ||
+      response?.merged_text ||
+      response?.merged_transcript ||
+      ""
+    );
+  }
+
+  return (
+    response?.merged_text ||
+    response?.merged_transcript ||
+    response?.text ||
+    segmentText
+  );
+};
 
 const buildSummaryView = (llmResult) => {
   const result = llmResult?.result || {};
@@ -121,6 +94,10 @@ function UploadAudio() {
   const [audioPreviewUrl, setAudioPreviewUrl] = useState("");
   const [sourceLanguage, setSourceLanguage] = useState("vi");
   const [displayLanguage, setDisplayLanguage] = useState("vi");
+  const [transcriptionMode, setTranscriptionMode] = useState("plain");
+  const [expectedSpeakersCount, setExpectedSpeakersCount] = useState("2");
+  const [fastMode, setFastMode] = useState(false);
+  const [skipPostProcessing, setSkipPostProcessing] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -128,6 +105,11 @@ function UploadAudio() {
   const [error, setError] = useState("");
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
+  const availableModels = useMemo(() => {
+    if (!Array.isArray(models)) return 0;
+    // Prefer an explicit availability flag, fallback to counting entries
+    return models.filter((m) => m?.available || m?.status === "ready").length;
+  }, [models]);
   const [transcription, setTranscription] = useState(null);
   const [originalTranscriptText, setOriginalTranscriptText] = useState("");
   const [editedTranscriptText, setEditedTranscriptText] = useState("");
@@ -135,7 +117,7 @@ function UploadAudio() {
   const [llmResult, setLlmResult] = useState(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
-  const [speakerProcessing, setSpeakerProcessing] = useState(false);
+  const [savedMeeting, setSavedMeeting] = useState(null);
 
   const transcriptSegments = transcription?.segments || [];
   const detectedSpeakers = useMemo(
@@ -147,11 +129,38 @@ function UploadAudio() {
     [transcriptSegments],
   );
 
+  const selectedExpectedSpeakers = useMemo(() => {
+    if (transcriptionMode !== "speaker") {
+      return null;
+    }
+
+    const parsedCount = Number(expectedSpeakersCount);
+    return Number.isFinite(parsedCount) ? parsedCount : null;
+  }, [transcriptionMode, expectedSpeakersCount]);
+
+  const expectedSpeakersLabel = useMemo(() => {
+    if (transcriptionMode === "plain") {
+      return "Transcript only";
+    }
+
+    return `${expectedSpeakersCount} people`;
+  }, [transcriptionMode, expectedSpeakersCount]);
+
   const canTranscribe = Boolean(selectedFile) && !processing;
   const canTranslate =
     Boolean(editedTranscriptText.trim()) && !translating && !processing;
   const canAnalyze = Boolean(editedTranscriptText.trim()) && !analyzing;
   const canAsk = Boolean(question.trim()) && Boolean(llmResult) && !asking;
+
+  const helperText = useMemo(() => {
+    if (processing) return "Transcription in progress...";
+    if (error) return error;
+    if (!health || health?.status !== "ok") return "Backend unavailable";
+    if (!selectedFile) return "Choose an audio file to get started.";
+    return "Ready to generate transcript.";
+  }, [processing, error, health, selectedFile]);
+
+  const summaryView = useMemo(() => buildSummaryView(llmResult), [llmResult]);
 
   useEffect(() => {
     const loadBackendState = async () => {
@@ -187,20 +196,13 @@ function UploadAudio() {
     transcriptTextareaRef.current.style.height = `${transcriptTextareaRef.current.scrollHeight}px`;
   }, [editedTranscriptText]);
 
-  const helperText = useMemo(() => {
-    if (!selectedFile) {
-      return "Choose an audio file to begin speech-to-text.";
-    }
-
-    return `Selected: ${selectedFile.name}`;
-  }, [selectedFile]);
-
-  const availableModels = useMemo(
-    () => models.filter((item) => item.available).length,
-    [models],
-  );
-
-  const summaryView = useMemo(() => buildSummaryView(llmResult), [llmResult]);
+  useEffect(() => {
+    console.debug("[UploadAudio] diarization mode changed", {
+      transcriptionMode,
+      expectedSpeakersCount,
+      selectedExpectedSpeakers,
+    });
+  }, [transcriptionMode, expectedSpeakersCount, selectedExpectedSpeakers]);
 
   const resetAnalysisState = () => {
     setLlmResult(null);
@@ -213,7 +215,7 @@ function UploadAudio() {
     setOriginalTranscriptText("");
     setEditedTranscriptText("");
     setTranslatedCache({});
-    setSpeakerProcessing(false);
+    setSavedMeeting(null);
     resetAnalysisState();
     setError("");
   };
@@ -250,95 +252,148 @@ function UploadAudio() {
     resetTranscriptState();
   };
 
+  const handleTranscriptionModeChange = (event) => {
+    setTranscriptionMode(event.target.value);
+    resetTranscriptState();
+  };
+
+  const handleExpectedSpeakersCountChange = (event) => {
+    setExpectedSpeakersCount(event.target.value);
+    resetTranscriptState();
+  };
+
+  const handleFastModeChange = (event) => {
+    setFastMode(Boolean(event.target.checked));
+    resetTranscriptState();
+  };
+
+  const handleSkipPostProcessingChange = (event) => {
+    setSkipPostProcessing(Boolean(event.target.checked));
+    resetTranscriptState();
+  };
+
   const handleTranscribe = async () => {
     if (!selectedFile) {
       return;
     }
 
+    if (
+      transcriptionMode === "speaker" &&
+      (!Number.isFinite(selectedExpectedSpeakers) ||
+        selectedExpectedSpeakers < 2)
+    ) {
+      setError("Please enter a valid participant count of 2 or more.");
+      return;
+    }
+
     setProcessing(true);
-    setSpeakerProcessing(false);
     setError("");
     setTranscription(null);
     setOriginalTranscriptText("");
     setEditedTranscriptText("");
     setTranslatedCache({});
+    setSavedMeeting(null);
 
     try {
-      const transcriptResponse = await uploadService.transcribeAudio(
+      // Determine backend flags based on UI toggles
+      const includeDiarization = !fastMode && transcriptionMode === "speaker";
+      const includeSummary = !skipPostProcessing;
+      const includeLlm = !skipPostProcessing;
+
+      const createdMeeting = await meetingService.createMeeting({
+        title: selectedFile.name.replace(/\.[^/.]+$/, "") || "Uploaded meeting",
+        description: `Audio upload: ${selectedFile.name}`,
+        startTime: new Date().toISOString(),
+        status: "Completed",
+      });
+
+      const streamedSegments = [];
+      const processResponse = await uploadService.processMeetingAudioStream(
+        createdMeeting.id,
         selectedFile,
-        sourceLanguage,
-        false,
+        {
+          language: sourceLanguage,
+          includeDiarization,
+          expectedSpeakers: includeDiarization ? selectedExpectedSpeakers : null,
+          includeSummary,
+          includeLlm,
+          onEvent: (event, data) => {
+            if (event === "status") {
+              setError(data.message || "");
+            }
+            if (event === "transcript_segment") {
+              streamedSegments.push(data);
+              const liveResponse = { segments: [...streamedSegments] };
+              const liveText = transcriptToEditorText(streamedSegments);
+              setTranscription(liveResponse);
+              setOriginalTranscriptText(liveText);
+              setEditedTranscriptText(liveText);
+            }
+            if (event === "saved") {
+              setSavedMeeting({
+                ...createdMeeting,
+                transcriptCount: data.transcripts?.length || streamedSegments.length,
+                fileId: data.file?.id,
+              });
+            }
+          },
+        },
       );
-      const editorText = buildTranscriptText(transcriptResponse);
+      setSavedMeeting({
+        ...createdMeeting,
+        transcriptCount:
+          processResponse?.saved?.transcripts?.length || streamedSegments.length,
+        fileId: processResponse?.saved?.file?.id,
+      });
+      setError("");
+
+      const transcriptResponse =
+        transcriptionMode === "speaker"
+          ? processResponse?.transcript || null
+          : processResponse || null;
+      const editorText = buildTranscriptText(
+        processResponse,
+        transcriptionMode === "plain",
+      );
+
       setTranscription({
-        ...transcriptResponse,
-        detected_speakers: 0,
-        assigned_speakers: 0,
-        num_speakers: 0,
+        ...(transcriptResponse || {}),
+        detected_speakers:
+          transcriptionMode === "speaker"
+            ? processResponse?.detected_speakers || 0
+            : 0,
+        expected_speakers:
+          transcriptionMode === "speaker"
+            ? (processResponse?.expected_speakers ?? null)
+            : null,
+        assigned_speakers:
+          transcriptionMode === "speaker"
+            ? processResponse?.assigned_speakers ||
+              transcriptResponse?.num_speakers ||
+              0
+            : 0,
+        num_speakers:
+          transcriptionMode === "speaker"
+            ? processResponse?.num_speakers ||
+              transcriptResponse?.num_speakers ||
+              0
+            : 0,
+        diarization:
+          transcriptionMode === "speaker"
+            ? processResponse?.diarization || null
+            : null,
+        warnings:
+          transcriptionMode === "speaker"
+            ? processResponse?.warnings || transcriptResponse?.warnings || []
+            : transcriptResponse?.warnings || [],
       });
       setOriginalTranscriptText(editorText);
       setEditedTranscriptText(editorText);
       setDisplayLanguage(sourceLanguage);
       setTranslatedCache({});
       resetAnalysisState();
-
-      setSpeakerProcessing(true);
-      void uploadService
-        .detectSpeakers(selectedFile)
-        .then((diarizationResponse) => {
-          const diarizationSegments = diarizationResponse?.segments || [];
-          const transcriptSegments = transcriptResponse?.segments || [];
-          const assignedSegments = attachSpeakersToTranscript(
-            transcriptSegments,
-            diarizationSegments,
-          );
-          const detectedSpeakers = new Set(
-            diarizationSegments
-              .map((segment) => segment.speaker)
-              .filter(Boolean),
-          ).size;
-          const assignedSpeakers = new Set(
-            assignedSegments.map((segment) => segment.speaker).filter(Boolean),
-          ).size;
-          const speakerLabeledText = buildTranscriptText({
-            segments: assignedSegments,
-          });
-
-          setTranscription((current) =>
-            current
-              ? {
-                  ...current,
-                  diarization: diarizationResponse,
-                  detected_speakers: detectedSpeakers,
-                  assigned_speakers: assignedSpeakers,
-                  num_speakers: assignedSpeakers,
-                  segments: assignedSegments,
-                }
-              : current,
-          );
-
-          setOriginalTranscriptText((current) => {
-            if (current === editorText) {
-              return speakerLabeledText;
-            }
-            return current;
-          });
-          setEditedTranscriptText((current) => {
-            if (current === editorText) {
-              return speakerLabeledText;
-            }
-            return current;
-          });
-        })
-        .catch((speakerError) => {
-          setError(speakerError.message);
-        })
-        .finally(() => {
-          setSpeakerProcessing(false);
-        });
     } catch (transcribeError) {
       setError(transcribeError.message);
-      setSpeakerProcessing(false);
     } finally {
       setProcessing(false);
     }
@@ -494,6 +549,80 @@ function UploadAudio() {
 
           <div className="space-y-2">
             <span className="text-sm font-semibold text-slate-100">
+              Generate mode
+            </span>
+            <select
+              value={transcriptionMode}
+              onChange={handleTranscriptionModeChange}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20"
+            >
+              <option value="plain">Transcript only</option>
+              <option value="speaker">Transcript + speaker labels</option>
+            </select>
+            <p className="text-xs text-slate-400">
+              Chọn transcript-only nếu chỉ muốn text, hoặc speaker-aware nếu cần
+              phân biệt người nói.
+            </p>
+          </div>
+
+          <div className="space-y-2 md:col-span-2">
+            <label className="inline-flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={fastMode}
+                onChange={handleFastModeChange}
+                className="h-4 w-4 rounded"
+              />
+              <span className="text-sm text-slate-300">
+                Fast (skip diarization)
+              </span>
+            </label>
+            <p className="text-xs text-slate-400">
+              If enabled, the backend will skip diarization for a faster
+              transcript (note: speaker labels will not be produced).
+            </p>
+
+            <label className="inline-flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={skipPostProcessing}
+                onChange={handleSkipPostProcessingChange}
+                className="h-4 w-4 rounded"
+              />
+              <span className="text-sm text-slate-300">
+                Skip summary & LLM post-processing
+              </span>
+            </label>
+            <p className="text-xs text-slate-400">
+              Disable expensive summarization and LLM refinement to speed up
+              end-to-end processing.
+            </p>
+          </div>
+
+          {transcriptionMode === "speaker" ? (
+            <label className="space-y-2 md:col-span-2">
+              <span className="text-sm font-semibold text-slate-100">
+                Expected participants
+              </span>
+              <input
+                type="number"
+                min="2"
+                max="10"
+                step="1"
+                inputMode="numeric"
+                value={expectedSpeakersCount}
+                onChange={handleExpectedSpeakersCountChange}
+                className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent-400 focus:ring-4 focus:ring-accent-500/20"
+                placeholder="2"
+              />
+              <p className="text-xs text-slate-400">
+                Nhập số người tham gia thực tế để diarization ổn định hơn.
+              </p>
+            </label>
+          ) : null}
+
+          <div className="space-y-2">
+            <span className="text-sm font-semibold text-slate-100">
               Display language
             </span>
             <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
@@ -509,8 +638,11 @@ function UploadAudio() {
                 <p className="text-lg font-semibold text-white">
                   {selectedFile.name}
                 </p>
-                <p className="mt-2 text-sm text-slate-400">
-                  {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
+                <p className="mt-2 text-sm text-slate-300">
+                  Generate mode:{" "}
+                  {transcriptionMode === "speaker"
+                    ? "Transcript + speaker labels"
+                    : "Transcript only"}
                 </p>
               </div>
               <button
@@ -545,11 +677,35 @@ function UploadAudio() {
           <p className="text-sm font-semibold text-white">Status</p>
           <p className="mt-2 text-sm text-slate-300">{helperText}</p>
           <p className="mt-2 text-sm text-slate-300">
+            Generate mode:{" "}
+            {transcriptionMode === "speaker"
+              ? "Transcript + speaker labels"
+              : "Transcript only"}
+          </p>
+          <p className="mt-2 text-sm text-slate-300">
+            Selected participants: {expectedSpeakersLabel}
+          </p>
+          <p className="mt-2 text-sm text-slate-300">
             Speaker labels:{" "}
             {transcription
               ? `${transcription.detected_speakers ?? transcription.num_speakers ?? 0} detected / ${transcription.assigned_speakers ?? transcription.num_speakers ?? 0} assigned`
               : "on"}
           </p>
+          {transcriptionMode === "speaker" &&
+          transcription?.expected_speakers ? (
+            <p className="mt-2 text-sm text-slate-300">
+              Expected participants: {transcription.expected_speakers}
+            </p>
+          ) : transcriptionMode === "speaker" ? (
+            <p className="mt-2 text-sm text-slate-300">
+              Expected participants: Auto detect
+            </p>
+          ) : null}
+          {transcriptionMode === "speaker" && !selectedExpectedSpeakers ? (
+            <p className="mt-2 text-sm text-rose-200">
+              Speaker mode is selected but the participant count is invalid.
+            </p>
+          ) : null}
           {detectedSpeakers.length ? (
             <p className="mt-2 text-sm text-slate-300">
               Detected speakers: {detectedSpeakers.join(", ")}
@@ -565,11 +721,6 @@ function UploadAudio() {
           <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
             Display language: {displayLanguageLabels[displayLanguage]}
           </p>
-          {speakerProcessing ? (
-            <p className="mt-2 text-sm text-accent-200">
-              Transcript is ready. Detecting speakers in the background...
-            </p>
-          ) : null}
         </div>
 
         <button
@@ -586,6 +737,24 @@ function UploadAudio() {
             {error}
           </div>
         )}
+
+        {savedMeeting ? (
+          <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-4">
+            <p className="text-sm font-semibold text-emerald-100">
+              Saved to database
+            </p>
+            <p className="mt-2 text-sm text-emerald-50/80">
+              Created meeting "{savedMeeting.title}" with{" "}
+              {savedMeeting.transcriptCount} transcript segments.
+            </p>
+            <Link
+              to={`/meetings/${savedMeeting.id}`}
+              className="mt-3 inline-flex rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600"
+            >
+              View saved meeting
+            </Link>
+          </div>
+        ) : null}
       </section>
 
       <div className="grid gap-8 xl:grid-cols-[1.08fr_0.92fr]">
@@ -839,5 +1008,4 @@ function UploadAudio() {
     </div>
   );
 }
-
 export default UploadAudio;

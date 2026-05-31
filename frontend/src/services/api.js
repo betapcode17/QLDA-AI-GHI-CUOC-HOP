@@ -2,7 +2,7 @@ import axios from "axios";
 import { mockMeetings, mockSettings } from "./mockData";
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:8000",
+  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:3001",
   headers: {
     "Content-Type": "application/json",
   },
@@ -31,6 +31,85 @@ export const meetingService = {
     }
   },
 
+  async createMeeting(payload) {
+    const response = await api.post("/meetings", payload);
+    return response.data;
+  },
+
+  async updateMeeting(id, payload) {
+    const response = await api.put(`/meetings/${id}`, payload);
+    return response.data;
+  },
+
+  async getParticipants(meetingId) {
+    const response = await api.get(`/meetings/${meetingId}/participants`);
+    return response.data;
+  },
+
+  async addParticipant(meetingId, payload) {
+    const response = await api.post(`/meetings/${meetingId}/participants`, payload);
+    return response.data;
+  },
+
+  async getSpeakers(meetingId) {
+    const response = await api.get(`/meetings/${meetingId}/speakers`);
+    return response.data;
+  },
+
+  async getTranscripts(meetingId) {
+    const response = await api.get(`/meetings/${meetingId}/transcripts`);
+    return response.data;
+  },
+
+  async getSummaries(meetingId) {
+    const response = await api.get(`/meetings/${meetingId}/summaries`);
+    return response.data;
+  },
+
+  async getFiles(meetingId) {
+    const response = await api.get(`/meetings/${meetingId}/files`);
+    return response.data;
+  },
+
+  async getNotes(meetingId) {
+    const response = await api.get("/notes", { params: { meetingId } });
+    return response.data;
+  },
+
+  async addNote(payload) {
+    const response = await api.post("/notes", payload);
+    return response.data;
+  },
+
+  async getActionItems(meetingId, status) {
+    const response = await api.get(`/meetings/${meetingId}/action-items`, {
+      params: status ? { status } : {},
+    });
+    return response.data;
+  },
+
+  async createActionItem(meetingId, payload) {
+    const response = await api.post(`/meetings/${meetingId}/action-items`, payload);
+    return response.data;
+  },
+
+  async updateActionItem(id, payload) {
+    const response = await api.put(`/action-items/${id}`, payload);
+    return response.data;
+  },
+
+  async completeActionItem(id) {
+    const response = await api.patch(`/action-items/${id}/complete`);
+    return response.data;
+  },
+
+  async exportMeeting(id, format) {
+    const response = await api.get(`/meetings/${id}/export/${format}`, {
+      responseType: "blob",
+    });
+    return response.data;
+  },
+
   async getMeetingById(id) {
     try {
       const response = await api.get(`/meetings/${id}`);
@@ -42,6 +121,27 @@ export const meetingService = {
       }
       return delay(meeting);
     }
+  },
+};
+
+export const dashboardService = {
+  async getOverview() {
+    const response = await api.get("/dashboard/overview");
+    return response.data;
+  },
+
+  async getAnalytics() {
+    const response = await api.get("/dashboard/analytics");
+    return response.data;
+  },
+};
+
+export const userService = {
+  async getUsers(params = {}) {
+    const response = await api.get("/users", { params });
+    return Array.isArray(response.data)
+      ? response.data
+      : response.data?.results || [];
   },
 };
 
@@ -144,6 +244,145 @@ export const uploadService = {
     } catch (error) {
       throw new Error(getErrorMessage(error, "Speech to text that bai."));
     }
+  },
+
+  async processAudio(
+    file,
+    language = "vi",
+    includeDiarization = true,
+    expectedSpeakers = null,
+    translateTo = null,
+    includeSummary = true,
+    includeLlm = true,
+  ) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await api.post("/api/process", formData, {
+        params: {
+          language,
+          include_diarization: includeDiarization,
+          expected_speakers: expectedSpeakers || undefined,
+          translate_to: translateTo || undefined,
+          include_summary: includeSummary,
+          include_llm: includeLlm,
+        },
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error, "Xu ly audio that bai."));
+    }
+  },
+
+  async processMeetingAudio(
+    meetingId,
+    file,
+    language = "vi",
+    includeDiarization = true,
+    expectedSpeakers = null,
+    translateTo = null,
+    includeSummary = true,
+    includeLlm = true,
+  ) {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await api.post(
+        `/meetings/${meetingId}/process-audio`,
+        formData,
+        {
+          params: {
+            language,
+            include_diarization: includeDiarization,
+            expected_speakers: expectedSpeakers || undefined,
+            translate_to: translateTo || undefined,
+            include_summary: includeSummary,
+            include_llm: includeLlm,
+            replace_transcripts: true,
+          },
+          headers: {
+            "Content-Type": "multipart/form-data",
+          },
+        },
+      );
+
+      return response.data;
+    } catch (error) {
+      throw new Error(
+        getErrorMessage(error, "Xu ly audio va luu database that bai."),
+      );
+    }
+  },
+
+  async processMeetingAudioStream(
+    meetingId,
+    file,
+    {
+      language = "vi",
+      includeDiarization = true,
+      expectedSpeakers = null,
+      translateTo = null,
+      includeSummary = false,
+      includeLlm = false,
+      onEvent,
+    } = {},
+  ) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const params = new URLSearchParams({
+      language,
+      include_diarization: String(includeDiarization),
+      include_summary: String(includeSummary),
+      include_llm: String(includeLlm),
+      replace_transcripts: "true",
+    });
+    if (expectedSpeakers) params.set("expected_speakers", String(expectedSpeakers));
+    if (translateTo) params.set("translate_to", translateTo);
+
+    const response = await fetch(
+      `${api.defaults.baseURL}/meetings/${meetingId}/process-audio-stream?${params}`,
+      {
+        method: "POST",
+        body: formData,
+      },
+    );
+    if (!response.ok || !response.body) {
+      throw new Error("Streaming transcription failed.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let finalData = null;
+
+    const parseEvent = (raw) => {
+      const lines = raw.split("\n");
+      const event = lines.find((line) => line.startsWith("event: "))?.slice(7);
+      const data = lines.find((line) => line.startsWith("data: "))?.slice(6);
+      if (!event || !data) return;
+      const parsed = JSON.parse(data);
+      onEvent?.(event, parsed);
+      if (event === "done") finalData = parsed;
+      if (event === "saved") finalData = { ...(finalData || {}), saved: parsed };
+      if (event === "error") throw new Error(parsed.message || "Streaming transcription failed.");
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+      chunks.filter(Boolean).forEach(parseEvent);
+    }
+    if (buffer.trim()) parseEvent(buffer.trim());
+    return finalData;
   },
 
   async detectSpeakers(file) {
