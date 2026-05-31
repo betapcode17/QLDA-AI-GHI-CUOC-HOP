@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      libsndfile1 \
+      git \
+      build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install \
+      torch==2.3.1 \
+      torchaudio==2.3.1 \
+      --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.docker.txt ./
+RUN python -m pip install -r requirements.docker.txt
+
+COPY app ./app
+COPY run.py ./run.py
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,21 @@
+services:
+  backend:
+    command: sh -c "npx prisma migrate deploy && node prisma/seed.js && npm run dev"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - ./backend/package.json:/app/package.json
+      - ./backend/package-lock.json:/app/package-lock.json
+      - backend-uploads:/app/uploads
+
+  frontend:
+    command: npm run dev -- --host 0.0.0.0
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/package.json:/app/package.json
+      - ./frontend/package-lock.json:/app/package-lock.json
+      - ./frontend/vite.config.js:/app/vite.config.js
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js
+      - ./frontend/postcss.config.js:/app/postcss.config.js
