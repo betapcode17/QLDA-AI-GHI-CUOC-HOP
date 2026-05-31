@@ -2,10 +2,15 @@ import { env } from './config/env.js';
 import { prisma } from './config/prisma.js';
 import { createApp } from './app.js';
 import { logger } from './utils/logger.js';
+import { createServer } from 'http';
+import { attachRecordingWebSocket } from './websocket/recording.socket.js';
 
 const app = createApp();
+const server = createServer(app);
 
-const server = app.listen(env.PORT, () => {
+attachRecordingWebSocket(server);
+
+server.listen(env.PORT, () => {
   logger.info(`AI Meeting Assistant backend listening on ${env.PORT}`);
 });
 

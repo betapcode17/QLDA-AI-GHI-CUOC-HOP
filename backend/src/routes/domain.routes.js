@@ -41,6 +41,8 @@ domainRoutes.delete('/files/:id', authenticate, fileController.remove);
 domainRoutes.get('/meetings/:meetingId/summaries', summaryController.list);
 domainRoutes.post('/meetings/:meetingId/summaries', authenticate, validate(summarySchemas.create), summaryController.create);
 domainRoutes.post('/meetings/:meetingId/summaries/generate', authenticate, summaryController.generate);
+domainRoutes.post('/meetings/:meetingId/vector-index', authenticate, summaryController.index);
+domainRoutes.post('/meetings/:meetingId/qa', authenticate, summaryController.ask);
 domainRoutes.put('/summaries/:id/regenerate', authenticate, validate(summarySchemas.update), summaryController.regenerate);
 
 domainRoutes.get('/meetings/:meetingId/action-items', actionItemController.list);

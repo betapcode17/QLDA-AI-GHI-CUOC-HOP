@@ -56,6 +56,18 @@ export const aiService = {
     const { data } = await ai.post('/debug/llm-test', payload);
     return data;
   },
+  async meetingQa(payload) {
+    const { data } = await ai.post('/api/meeting-qa', payload);
+    return data;
+  },
+  async indexMeetingTranscript(payload) {
+    const { data } = await ai.post('/api/meeting-rag/index', payload);
+    return data;
+  },
+  async askMeetingWithRag(payload) {
+    const { data } = await ai.post('/api/meeting-rag/ask', payload);
+    return data;
+  },
   async translateTranscript(id, direction = 'vi-en') {
     const transcript = await prisma.transcript.findUnique({ where: { id } });
     if (!transcript) throw new AppError(404, 'Transcript not found');

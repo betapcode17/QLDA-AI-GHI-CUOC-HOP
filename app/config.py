@@ -26,6 +26,7 @@ TMP_DIR = CACHE_DIR / "tmp"
 DATA_DIR = PROJECT_ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 PROCESSED_DIR = DATA_DIR / "processed"
+CHROMA_DIR = Path(os.environ.get("TEMP", str(CACHE_DIR))) / "QLDA_AI_GHI_CUOC_HOP" / "chroma_meetings"
 
 
 def configure_local_environment() -> None:
@@ -33,6 +34,7 @@ def configure_local_environment() -> None:
     (CACHE_DIR / "matplotlib").mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("TMP", str(TMP_DIR))
     os.environ.setdefault("TEMP", str(TMP_DIR))
@@ -44,7 +46,9 @@ def configure_local_environment() -> None:
     # Ollama Configuration
     os.environ.setdefault("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     os.environ.setdefault("OLLAMA_MODEL", "qwen2.5:3b")
+    os.environ.setdefault("OLLAMA_EMBED_MODEL", "nomic-embed-text")
     os.environ.setdefault("OLLAMA_TIMEOUT_SECONDS", "120")
+    os.environ.setdefault("CHROMA_DB_DIR", str(CHROMA_DIR))
     
     # Model Paths - Support both project-local and custom paths
     os.environ.setdefault("STT_MODEL_DIR", r"C:\Users\ADMIN\PhoWhisper-medium")
@@ -154,7 +158,9 @@ class Settings:
     # Ollama LLM Configuration
     ollama_base_url: str = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     ollama_model: str = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+    ollama_embed_model: str = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
     ollama_timeout_seconds: float = float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "120"))
+    chroma_db_dir: Path = Path(os.environ.get("CHROMA_DB_DIR", str(CHROMA_DIR)))
     
     # Ollama endpoints (for different API routes)
     @property

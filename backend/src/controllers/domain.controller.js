@@ -2,6 +2,15 @@ import path from 'path';
 import { actionItemService, fileService, keywordService, noteService, participantService, speakerService, summaryService, transcriptService } from '../services/domain.service.js';
 import { aiService } from '../services/ai.service.js';
 
+const MAX_SUMMARY_TRANSCRIPT_CHARS = 10000;
+
+const compactTranscriptForLlm = (text, maxChars) => {
+  if (text.length <= maxChars) return text;
+  const head = text.slice(0, Math.floor(maxChars * 0.7));
+  const tail = text.slice(-Math.floor(maxChars * 0.3));
+  return `${head}\n\n[... transcript shortened for local Qwen context ...]\n\n${tail}`;
+};
+
 export const participantController = {
   add: async (req, res, next) => { try { res.status(201).json(await participantService.add(req.params.meetingId, req.body)); } catch (e) { next(e); } },
   list: async (req, res, next) => { try { res.json(await participantService.list(req.params.meetingId)); } catch (e) { next(e); } },
@@ -64,11 +73,62 @@ export const summaryController = {
   generate: async (req, res, next) => {
     try {
       const rows = await transcriptService.list({ meetingId: req.params.meetingId });
-      const text = rows.map((row) => row.originalText).join('\n');
-      const result = text ? await aiService.summarizeText({ text, max_new_tokens: 512, min_new_tokens: 60 }) : { summary: '' };
+      const text = rows.map((row) => {
+        const speaker = row.speaker?.realName || row.speaker?.speakerLabel || 'Speaker';
+        return `${speaker}: ${row.originalText}`;
+      }).join('\n');
+      const llmTranscript = compactTranscriptForLlm(text, MAX_SUMMARY_TRANSCRIPT_CHARS);
+      if (text.trim()) {
+        await aiService.indexMeetingTranscript({
+          meeting_id: req.params.meetingId,
+          transcript: text
+        });
+      }
+      const result = text ? await aiService.llmTest({ transcript: llmTranscript }) : { result: {} };
+      const llmResult = result.result || {};
+      const content = llmResult.summary || llmResult.meeting_minutes || result.summary || result.content || '';
       res.status(201).json(await summaryService.create(req.params.meetingId, {
         summaryType: req.body.summaryType || 'Executive',
-        content: result.summary || result.content || ''
+        content
+      }));
+    } catch (e) { next(e); }
+  },
+  ask: async (req, res, next) => {
+    try {
+      const question = String(req.body.question || '').trim();
+      if (!question) return res.status(400).json({ error: 'Question is required' });
+
+      const rows = await transcriptService.list({ meetingId: req.params.meetingId });
+      const transcript = rows.map((row) => {
+        const speaker = row.speaker?.realName || row.speaker?.speakerLabel || 'Speaker';
+        const start = row.startTimestamp ?? 0;
+        const end = row.endTimestamp ?? 0;
+        return `${speaker} [${start}s-${end}s]: ${row.originalText}`;
+      }).join('\n');
+
+      if (!transcript.trim()) return res.status(400).json({ error: 'Meeting transcript is empty' });
+      res.json(await aiService.askMeetingWithRag({
+        meeting_id: req.params.meetingId,
+        transcript,
+        question,
+        top_k: Number(req.body.topK) || 5
+      }));
+    } catch (e) { next(e); }
+  },
+  index: async (req, res, next) => {
+    try {
+      const rows = await transcriptService.list({ meetingId: req.params.meetingId });
+      const transcript = rows.map((row) => {
+        const speaker = row.speaker?.realName || row.speaker?.speakerLabel || 'Speaker';
+        const start = row.startTimestamp ?? 0;
+        const end = row.endTimestamp ?? 0;
+        return `${speaker} [${start}s-${end}s]: ${row.originalText}`;
+      }).join('\n');
+
+      if (!transcript.trim()) return res.status(400).json({ error: 'Meeting transcript is empty' });
+      res.json(await aiService.indexMeetingTranscript({
+        meeting_id: req.params.meetingId,
+        transcript
       }));
     } catch (e) { next(e); }
   },

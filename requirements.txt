@@ -11,3 +11,4 @@ soundfile
 faster-whisper
 pyannote.audio
 huggingface_hub
+chromadb

@@ -1,4 +1,12 @@
-function AudioRecorder({ isRecording, duration, level, onStart, onStop, busy }) {
+function AudioRecorder({
+  isRecording,
+  duration,
+  level,
+  onStart,
+  onStop,
+  busy,
+  controls = null,
+}) {
   const bars = Array.from({ length: 18 }, (_, index) => {
     const active = isRecording ? ((index + level) % 5) + 8 : 3;
     return active;
@@ -37,6 +45,8 @@ function AudioRecorder({ isRecording, duration, level, onStart, onStop, busy }) 
           </button>
         </div>
       </div>
+
+      {controls ? <div className="mt-6">{controls}</div> : null}
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_220px]">
         <div className="rounded-[24px] bg-white/5 px-5 py-6">
