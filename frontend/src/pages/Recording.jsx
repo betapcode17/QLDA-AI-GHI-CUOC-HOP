@@ -4,7 +4,8 @@ import SummaryBox from '../components/SummaryBox';
 import TranscriptBox from '../components/TranscriptBox';
 import { recordingService, uploadService } from '../services/api';
 
-const CHUNK_MS = 2500;
+const SINGLE_SPEAKER_CHUNK_MS = 2500;
+const MULTI_SPEAKER_CHUNK_MS = 6000;
 
 const formatTime = (seconds) => {
   const totalSeconds = Math.max(0, Math.floor(seconds || 0));
@@ -65,13 +66,16 @@ const buildSummaryFromLlm = (llmResult, fallbackOverview) => {
 function Recording() {
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const recordingSocketRef = useRef(null);
   const recorderRestartTimeoutRef = useRef(null);
   const processingChunkRef = useRef(false);
   const pendingChunksRef = useRef([]);
+  const inflightLiveChunksRef = useRef(0);
   const transcriptIndexRef = useRef(0);
   const elapsedSecondsRef = useRef(0);
   const chunkPartsRef = useRef([]);
   const shouldContinueRef = useRef(false);
+  const stopRequestedRef = useRef(false);
   const transcriptRef = useRef([]);
   const autoAnalyzeAfterStopRef = useRef(false);
   const llmRunningRef = useRef(false);
@@ -91,6 +95,8 @@ function Recording() {
   const [displayTranscript, setDisplayTranscript] = useState([]);
   const [translatingTranscript, setTranslatingTranscript] = useState(false);
   const [translatedTranscriptCache, setTranslatedTranscriptCache] = useState({});
+  const [speakerMode, setSpeakerMode] = useState('single');
+  const [expectedSpeakers, setExpectedSpeakers] = useState('2');
 
   useEffect(() => {
     if (!isRecording) {
@@ -129,6 +135,7 @@ function Recording() {
         window.clearTimeout(recorderRestartTimeoutRef.current);
       }
       mediaRecorderRef.current?.stop?.();
+      recordingSocketRef.current?.close?.();
       mediaStreamRef.current?.getTracks?.().forEach((track) => track.stop());
     };
   }, []);
@@ -139,11 +146,39 @@ function Recording() {
     return `${minutes}:${seconds}`;
   }, [elapsedSeconds]);
 
+  const chunkDurationMs = speakerMode === 'multi' ? MULTI_SPEAKER_CHUNK_MS : SINGLE_SPEAKER_CHUNK_MS;
+
+  const appendTranscriptEntry = ({ speaker, text, time }) => {
+    if (!text?.trim()) {
+      return;
+    }
+
+    setTranscript((current) => {
+      const previousText = current.at(-1)?.text || '';
+      const mergedText = trimOverlapText(previousText, text);
+
+      if (!mergedText) {
+        return current;
+      }
+
+      transcriptIndexRef.current += 1;
+      return [
+        ...current,
+        {
+          speaker,
+          time: time || formatTime(elapsedSecondsRef.current),
+          text: mergedText,
+        },
+      ];
+    });
+  };
+
   const maybeRunFinalAnalysis = async () => {
     if (
       llmRunningRef.current ||
       isRecordingRef.current ||
       processingChunkRef.current ||
+      inflightLiveChunksRef.current > 0 ||
       pendingChunksRef.current.length > 0 ||
       !autoAnalyzeAfterStopRef.current
     ) {
@@ -182,6 +217,114 @@ function Recording() {
       setLlmAnalyzing(false);
     }
   };
+
+  const completeLiveChunk = () => {
+    inflightLiveChunksRef.current = Math.max(0, inflightLiveChunksRef.current - 1);
+    processingChunkRef.current = inflightLiveChunksRef.current > 0;
+
+    if (stopRequestedRef.current && inflightLiveChunksRef.current === 0) {
+      recordingSocketRef.current?.close?.();
+      recordingSocketRef.current = null;
+      void maybeRunFinalAnalysis();
+    }
+  };
+
+  const connectRecordingSocket = () =>
+    new Promise((resolve, reject) => {
+      const socket = recordingService.createRecordingSocket();
+      recordingSocketRef.current = socket;
+
+      const timeout = window.setTimeout(() => {
+        socket.close();
+        reject(new Error('Timed out while opening live transcription WebSocket.'));
+      }, 8000);
+
+      socket.onopen = () => {
+        window.clearTimeout(timeout);
+        socket.send(
+          JSON.stringify({
+            type: 'config',
+            mode: speakerMode,
+            language: 'vi',
+            expectedSpeakers: Number(expectedSpeakers) || 2,
+          }),
+        );
+        setLiveStatus(
+          speakerMode === 'multi'
+            ? 'WebSocket connected. Listening with speaker diarization...'
+            : 'WebSocket connected. Listening with fast STT mode...',
+        );
+        resolve(socket);
+      };
+
+      socket.onmessage = (event) => {
+        let payload = null;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (payload.type === 'configured') {
+          setLiveStatus(
+            payload.mode === 'multi'
+              ? 'Live speaker-aware transcription is ready.'
+              : 'Live single-speaker transcription is ready.',
+          );
+          return;
+        }
+
+        if (payload.type === 'chunk_received') {
+          setLiveStatus(`Audio chunk queued for AI processing (${payload.queued}).`);
+          return;
+        }
+
+        if (payload.type === 'status') {
+          setLiveStatus(payload.message);
+          return;
+        }
+
+        if (payload.type === 'transcript_segment') {
+          const segment = payload.segment || {};
+          appendTranscriptEntry({
+            speaker: segment.speaker || (speakerMode === 'multi' ? 'SPEAKER' : 'Speaker'),
+            time: formatTime(elapsedSecondsRef.current),
+            text: segment.text,
+          });
+          return;
+        }
+
+        if (payload.type === 'chunk_done') {
+          setChunksProcessed((current) => current + 1);
+          setLiveStatus(
+            payload.detected
+              ? 'Transcript updated from latest live audio chunk.'
+              : 'Latest chunk processed, but no speech was detected.',
+          );
+          completeLiveChunk();
+          return;
+        }
+
+        if (payload.type === 'error') {
+          setError(payload.message || 'Live transcription failed.');
+          setLiveStatus('A live chunk failed. Recording can continue.');
+          if (payload.chunkId) {
+            completeLiveChunk();
+          }
+        }
+      };
+
+      socket.onerror = () => {
+        window.clearTimeout(timeout);
+        reject(new Error('Could not connect to live transcription WebSocket.'));
+      };
+
+      socket.onclose = () => {
+        if (recordingSocketRef.current === socket) {
+          recordingSocketRef.current = null;
+        }
+      };
+    });
 
   const handleTranslateTranscript = async (nextLanguage) => {
     if (nextLanguage === displayLanguage) {
@@ -249,35 +392,53 @@ function Recording() {
     }
 
     processingChunkRef.current = true;
-    setLiveStatus('Sending audio chunk to PhoWhisper...');
+    setLiveStatus(
+      speakerMode === 'multi'
+        ? 'Sending speaker-aware audio chunk to local AI...'
+        : 'Sending audio chunk to PhoWhisper...',
+    );
 
     try {
-      const response = await recordingService.transcribeChunk(nextChunk, 'vi');
-      const text = response?.text?.trim();
+      let appended = false;
 
-      if (text) {
-        setTranscript((current) => {
-          const previousText = current.at(-1)?.text || '';
-          const mergedText = trimOverlapText(previousText, text);
-
-          if (!mergedText) {
-            return current;
-          }
-
-          transcriptIndexRef.current += 1;
-          return [
-            ...current,
-            {
-              speaker: 'PhoWhisper',
+      if (speakerMode === 'multi') {
+        const response = await recordingService.processSpeakerChunk(
+          nextChunk,
+          'vi',
+          Number(expectedSpeakers) || 2,
+        );
+        const segments = response?.transcript?.segments || response?.segments || [];
+        segments.forEach((segment) => {
+          if (segment?.text?.trim()) {
+            appendTranscriptEntry({
+              speaker: segment.speaker || 'SPEAKER',
               time: formatTime(elapsedSecondsRef.current),
-              text: mergedText,
-            },
-          ];
+              text: segment.text.trim(),
+            });
+            appended = true;
+          }
         });
+      } else {
+        const response = await recordingService.transcribeChunk(nextChunk, 'vi');
+        const text = response?.text?.trim();
+        if (text) {
+          appendTranscriptEntry({
+            speaker: 'Speaker',
+            time: formatTime(elapsedSecondsRef.current),
+            text,
+          });
+          appended = true;
+        }
       }
 
       setChunksProcessed((current) => current + 1);
-      setLiveStatus(text ? 'Transcript updated from latest audio chunk.' : 'Chunk received but no speech was detected.');
+      setLiveStatus(
+        appended
+          ? speakerMode === 'multi'
+            ? 'Transcript updated with speaker labels from latest chunk.'
+            : 'Transcript updated from latest audio chunk.'
+          : 'Chunk received but no speech was detected.',
+      );
     } catch (chunkError) {
       setError(chunkError.message);
       setLiveStatus('A chunk failed to transcribe. Recording can continue.');
@@ -295,7 +456,6 @@ function Recording() {
     const mimeType = pickSupportedMimeType();
     const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 
-    chunkPartsRef.current = [];
     mediaRecorderRef.current = recorder;
 
     recorder.ondataavailable = (event) => {
@@ -303,36 +463,32 @@ function Recording() {
         return;
       }
 
-      chunkPartsRef.current.push(event.data);
+      const socket = recordingSocketRef.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        setLiveStatus('Live WebSocket is not ready, skipping one audio chunk.');
+        return;
+      }
+
+      inflightLiveChunksRef.current += 1;
+      processingChunkRef.current = true;
+      try {
+        socket.send(event.data);
+      } catch (sendError) {
+        completeLiveChunk();
+        setError(sendError.message || 'Could not send audio chunk to WebSocket.');
+      }
     };
 
     recorder.onstop = () => {
-      const chunkBlob = new Blob(chunkPartsRef.current, {
-        type: recorder.mimeType || mimeType || 'audio/webm',
-      });
-      chunkPartsRef.current = [];
-
-      if (chunkBlob.size > 0) {
-        pendingChunksRef.current.push(chunkBlob);
-        void processNextChunk();
-      }
-
-      if (shouldContinueRef.current && mediaStreamRef.current) {
-        recorderRestartTimeoutRef.current = window.setTimeout(() => {
-          startRecorderSegment(mediaStreamRef.current);
-        }, 100);
-      } else {
-        mediaRecorderRef.current = null;
+      mediaRecorderRef.current = null;
+      if (!shouldContinueRef.current && inflightLiveChunksRef.current === 0) {
+        recordingSocketRef.current?.close?.();
+        recordingSocketRef.current = null;
+        void maybeRunFinalAnalysis();
       }
     };
 
-    recorder.start();
-
-    recorderRestartTimeoutRef.current = window.setTimeout(() => {
-      if (recorder.state === 'recording') {
-        recorder.stop();
-      }
-    }, CHUNK_MS);
+    recorder.start(chunkDurationMs);
   };
 
   const handleStart = async () => {
@@ -351,8 +507,10 @@ function Recording() {
 
       pendingChunksRef.current = [];
       processingChunkRef.current = false;
+      inflightLiveChunksRef.current = 0;
       transcriptIndexRef.current = 0;
       shouldContinueRef.current = true;
+      stopRequestedRef.current = false;
       mediaStreamRef.current = stream;
 
       setTranscript([]);
@@ -364,7 +522,12 @@ function Recording() {
       setDisplayLanguage('vi');
       setTranslatedTranscriptCache({});
       autoAnalyzeAfterStopRef.current = false;
-      setLiveStatus('Listening to microphone and sending complete audio segments to PhoWhisper...');
+      setLiveStatus(
+        speakerMode === 'multi'
+          ? 'Opening WebSocket for speaker-aware live transcription...'
+          : 'Opening WebSocket for fast live STT...',
+      );
+      await connectRecordingSocket();
       setIsRecording(true);
       startRecorderSegment(stream);
     } catch (startError) {
@@ -383,16 +546,19 @@ function Recording() {
 
     try {
       shouldContinueRef.current = false;
+      stopRequestedRef.current = true;
       if (recorderRestartTimeoutRef.current) {
         window.clearTimeout(recorderRestartTimeoutRef.current);
       }
       autoAnalyzeAfterStopRef.current = true;
-      mediaRecorderRef.current?.stop?.();
+      if (mediaRecorderRef.current?.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
       await recordingService.stopRecording();
       setIsRecording(false);
       mediaStreamRef.current?.getTracks?.().forEach((track) => track.stop());
       mediaStreamRef.current = null;
-      setLiveStatus('Recording stopped. Final audio segment is being processed if available.');
+      setLiveStatus('Recording stopped. Waiting for final live chunks to finish.');
     } catch (stopError) {
       setError(stopError.message || 'Unable to stop recording cleanly.');
     } finally {
@@ -437,6 +603,59 @@ function Recording() {
     </div>
   );
 
+  const recorderControls = (
+    <div className="grid gap-4 rounded-[24px] border border-white/10 bg-white/5 p-4 md:grid-cols-[1fr_220px]">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+          Live transcription mode
+        </p>
+        <div className="mt-3 flex flex-wrap gap-3">
+          <button
+            type="button"
+            disabled={isRecording}
+            onClick={() => setSpeakerMode('single')}
+            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+              speakerMode === 'single'
+                ? 'bg-accent-500 text-white'
+                : 'border border-white/10 bg-slate-900 text-slate-300'
+            } disabled:cursor-not-allowed disabled:opacity-70`}
+          >
+            1 speaker
+          </button>
+          <button
+            type="button"
+            disabled={isRecording}
+            onClick={() => setSpeakerMode('multi')}
+            className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+              speakerMode === 'multi'
+                ? 'bg-accent-500 text-white'
+                : 'border border-white/10 bg-slate-900 text-slate-300'
+            } disabled:cursor-not-allowed disabled:opacity-70`}
+          >
+            Multiple speakers
+          </button>
+        </div>
+        <p className="mt-3 text-sm text-slate-400">
+          {speakerMode === 'single'
+            ? 'Fast mode: STT only, no diarization.'
+            : 'Speaker mode: longer chunks run diarization, then STT with speaker labels.'}
+        </p>
+      </div>
+      <label className="space-y-2">
+        <span className="text-sm font-semibold text-slate-200">Expected speakers</span>
+        <input
+          type="number"
+          min="2"
+          max="8"
+          disabled={isRecording || speakerMode === 'single'}
+          value={expectedSpeakers}
+          onChange={(event) => setExpectedSpeakers(event.target.value)}
+          className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none disabled:cursor-not-allowed disabled:text-slate-500"
+        />
+      </label>
+    </div>
+  );
+
   return (
     <div className="space-y-8">
       <AudioRecorder
@@ -446,6 +665,7 @@ function Recording() {
         onStart={handleStart}
         onStop={handleStop}
         busy={busy}
+        controls={recorderControls}
       />
 
       {error ? (

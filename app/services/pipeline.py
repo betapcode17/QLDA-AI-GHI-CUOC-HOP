@@ -12,6 +12,9 @@ from app.services.stt import stt_service
 from app.services.summarization import summarization_service
 from app.services.text_quality import LOW_INFORMATION_SUMMARY, is_low_information_transcript
 from app.services.translation import Direction, translation_service
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def compact_diarization_segments(segments):
@@ -246,6 +249,13 @@ def process_meeting_audio(
         emit_stream_event(stream_callback, "status", {"stage": "llm", "message": "Running LLM refinement"})
         language_hint = (language or "").lower()
         llm_existing_summary = summary if language_hint.startswith("vi") else translated_summary or summary
+        logger.debug(
+            "Calling LLM refinement | model=%s base_url=%s merged_transcript_chars=%d existing_summary=%s",
+            llm_service.config.model,
+            llm_service.config.base_url,
+            len(merged_transcript or ""),
+            bool(llm_existing_summary),
+        )
         llm = llm_service.refine_meeting(
             merged_transcript=merged_transcript,
             existing_summary=llm_existing_summary,

@@ -19,6 +19,10 @@ function MeetingDetail() {
   });
   const [activeTab, setActiveTab] = useState("Transcript");
   const [noteText, setNoteText] = useState("");
+  const [summaryGenerating, setSummaryGenerating] = useState(false);
+  const [qaQuestion, setQaQuestion] = useState("");
+  const [qaAnswer, setQaAnswer] = useState(null);
+  const [qaLoading, setQaLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -79,6 +83,40 @@ function MeetingDetail() {
     link.download = `${meeting.title}.${format}`;
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleGenerateSummary = async () => {
+    setSummaryGenerating(true);
+    setError("");
+    try {
+      const summary = await meetingService.generateSummary(id);
+      setRelated((current) => ({
+        ...current,
+        summaries: [summary, ...current.summaries],
+      }));
+      setActiveTab("Summary");
+    } catch (summaryError) {
+      setError(summaryError.message || "Could not generate summary.");
+    } finally {
+      setSummaryGenerating(false);
+    }
+  };
+
+  const handleAskMeeting = async (event) => {
+    event.preventDefault();
+    if (!qaQuestion.trim()) return;
+
+    setQaLoading(true);
+    setQaAnswer(null);
+    setError("");
+    try {
+      const result = await meetingService.askMeeting(id, qaQuestion.trim());
+      setQaAnswer(result);
+    } catch (qaError) {
+      setError(qaError.message || "Could not ask the meeting transcript.");
+    } finally {
+      setQaLoading(false);
+    }
   };
 
   if (loading) return <LoadingState cards={2} />;
@@ -168,13 +206,88 @@ function MeetingDetail() {
         ) : null}
 
         {activeTab === "Summary" ? (
-          <div className="space-y-4">
-            {related.summaries.map((summary) => (
-              <article key={summary.id} className="rounded-2xl bg-white/5 p-4">
-                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">{summary.summaryType}</p>
-                <p className="mt-3 text-sm leading-7 text-slate-100">{summary.content}</p>
-              </article>
-            ))}
+          <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">
+                    Qwen meeting summary
+                  </p>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Summary is generated from the transcript saved in this meeting.
+                  </p>
+                </div>
+                {!related.summaries.length ? (
+                  <button
+                    type="button"
+                    onClick={handleGenerateSummary}
+                    disabled={summaryGenerating || !related.transcripts.length}
+                    className="rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                  >
+                    {summaryGenerating ? "Generating..." : "Generate summary"}
+                  </button>
+                ) : null}
+              </div>
+
+              {!related.summaries.length ? (
+                <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 p-6 text-sm leading-7 text-slate-300">
+                  No summary yet. Generate one after transcripts are available.
+                </div>
+              ) : null}
+
+              {related.summaries.map((summary) => (
+                <article key={summary.id} className="rounded-2xl bg-white/5 p-4">
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">{summary.summaryType}</p>
+                  <p className="mt-3 whitespace-pre-line text-sm leading-7 text-slate-100">{summary.content}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">
+                Ask this transcript
+              </p>
+              <form onSubmit={handleAskMeeting} className="mt-4 space-y-3">
+                <textarea
+                  value={qaQuestion}
+                  onChange={(event) => setQaQuestion(event.target.value)}
+                  rows={4}
+                  placeholder="Ask about decisions, action items, deadlines, risks..."
+                  className="w-full resize-none rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm leading-6 text-white outline-none focus:border-accent-400"
+                />
+                <button
+                  type="submit"
+                  disabled={qaLoading || !qaQuestion.trim() || !related.transcripts.length}
+                  className="rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                >
+                  {qaLoading ? "Asking Qwen..." : "Ask Qwen"}
+                </button>
+              </form>
+              {qaAnswer ? (
+                <div className="mt-4 rounded-2xl bg-slate-950/70 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                    {qaAnswer.model || "LLM"} answer
+                  </p>
+                  <p className="mt-3 whitespace-pre-line text-sm leading-7 text-slate-100">
+                    {qaAnswer.answer || qaAnswer.error || "No answer returned."}
+                  </p>
+                  {qaAnswer.chunks?.length ? (
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                        Retrieved chunks: {qaAnswer.chunks.length}
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {qaAnswer.chunks.slice(0, 3).map((chunk, index) => (
+                          <p key={`${chunk.metadata?.chunk_index ?? index}-${index}`} className="rounded-xl bg-white/5 px-3 py-2 text-xs leading-5 text-slate-400">
+                            {chunk.text}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 

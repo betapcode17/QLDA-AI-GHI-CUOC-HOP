@@ -125,6 +125,42 @@ class LLMTestRequest(BaseModel):
     transcript: str | None = None
 
 
+class MeetingQARequest(BaseModel):
+    transcript: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+
+
+class MeetingQAResponse(BaseModel):
+    ok: bool
+    model: str
+    base_url: str
+    question: str
+    answer: str | None = None
+    chunks: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
+class MeetingRagIndexRequest(BaseModel):
+    meeting_id: str = Field(min_length=1)
+    transcript: str = Field(min_length=1)
+
+
+class MeetingRagIndexResponse(BaseModel):
+    ok: bool
+    meeting_id: str
+    chunks_indexed: int = 0
+    collection: str
+    embedding_model: str
+    error: str | None = None
+
+
+class MeetingRagQARequest(BaseModel):
+    meeting_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    transcript: str | None = None
+    top_k: int = Field(default=5, ge=1, le=12)
+
+
 class LLMHealthResponse(BaseModel):
     ok: bool
     model: str

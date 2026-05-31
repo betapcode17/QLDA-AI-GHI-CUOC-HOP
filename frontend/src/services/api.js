@@ -19,6 +19,12 @@ const getErrorMessage = (error, fallback) =>
   error?.message ||
   fallback;
 
+const buildWebSocketUrl = (path) => {
+  const baseUrl = api.defaults.baseURL || window.location.origin;
+  const normalized = baseUrl.replace(/\/$/, "").replace(/^http/, "ws");
+  return `${normalized}${path}`;
+};
+
 export const meetingService = {
   async getMeetings() {
     try {
@@ -63,6 +69,23 @@ export const meetingService = {
 
   async getSummaries(meetingId) {
     const response = await api.get(`/meetings/${meetingId}/summaries`);
+    return response.data;
+  },
+
+  async generateSummary(meetingId, summaryType = "Executive") {
+    const response = await api.post(`/meetings/${meetingId}/summaries/generate`, {
+      summaryType,
+    });
+    return response.data;
+  },
+
+  async indexMeetingTranscript(meetingId) {
+    const response = await api.post(`/meetings/${meetingId}/vector-index`);
+    return response.data;
+  },
+
+  async askMeeting(meetingId, question) {
+    const response = await api.post(`/meetings/${meetingId}/qa`, { question });
     return response.data;
   },
 
@@ -146,6 +169,10 @@ export const userService = {
 };
 
 export const recordingService = {
+  createRecordingSocket() {
+    return new WebSocket(buildWebSocketUrl("/ws/recording"));
+  },
+
   async startRecording() {
     try {
       const response = await api.post("/record/start");
@@ -188,6 +215,36 @@ export const recordingService = {
       return response.data;
     } catch (error) {
       throw new Error(getErrorMessage(error, "Live transcription failed."));
+    }
+  },
+
+  async processSpeakerChunk(
+    audioBlob,
+    language = "vi",
+    expectedSpeakers = 2,
+  ) {
+    try {
+      const formData = new FormData();
+      formData.append("file", audioBlob, `speaker-chunk-${Date.now()}.webm`);
+
+      const response = await api.post("/api/process", formData, {
+        params: {
+          language,
+          include_diarization: true,
+          expected_speakers: expectedSpeakers,
+          include_summary: false,
+          include_llm: false,
+        },
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error(
+        getErrorMessage(error, "Speaker-aware live transcription failed."),
+      );
     }
   },
 };

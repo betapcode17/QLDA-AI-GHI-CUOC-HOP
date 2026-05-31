@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import torch
+import logging
 
 from app.config import PROJECT_ROOT, settings
 from app.schemas import (
@@ -23,6 +24,11 @@ from app.schemas import (
     HealthResponse,
     LLMHealthResponse,
     LLMTestRequest,
+    MeetingQARequest,
+    MeetingQAResponse,
+    MeetingRagIndexRequest,
+    MeetingRagIndexResponse,
+    MeetingRagQARequest,
     ProcessResponse,
     STTHealthResponse,
     SummaryRequest,
@@ -49,6 +55,7 @@ from app.services.pipeline import format_merged_transcript, process_meeting_audi
 from app.services.stt import stt_service
 from app.services.summarization import summarization_service
 from app.services.translation import translation_service
+from app.services.vector_store import COLLECTION_NAME, vector_store
 
 
 def configure_console_encoding() -> None:
@@ -61,6 +68,8 @@ def configure_console_encoding() -> None:
 
 
 configure_console_encoding()
+
+logger = logging.getLogger(__name__)
 
 
 def cleanup_temporary_gpu_memory() -> None:
@@ -234,6 +243,7 @@ def health() -> HealthResponse:
 
 @app.get("/health/llm", response_model=LLMHealthResponse)
 async def llm_health() -> LLMHealthResponse:
+    logger.info("LLM health check requested | model=%s base_url=%s", llm_service.config.model, llm_service.config.base_url)
     result = await run_in_threadpool(llm_service.smoke_test)
     return LLMHealthResponse(
         ok=result.error is None,
@@ -259,6 +269,7 @@ async def stt_health() -> STTHealthResponse:
 
 @app.post("/debug/llm-test", response_model=LLMHealthResponse)
 async def debug_llm_test(payload: LLMTestRequest) -> LLMHealthResponse:
+    logger.info("LLM debug test | model=%s base_url=%s transcript_len=%d", llm_service.config.model, llm_service.config.base_url, len(payload.transcript or ""))
     result = await run_in_threadpool(llm_service.smoke_test, payload.transcript)
     return LLMHealthResponse(
         ok=result.error is None,
@@ -267,6 +278,119 @@ async def debug_llm_test(payload: LLMTestRequest) -> LLMHealthResponse:
         result=result,
         error=result.error,
     )
+
+
+@app.post("/api/meeting-qa", response_model=MeetingQAResponse)
+async def meeting_qa(payload: MeetingQARequest) -> MeetingQAResponse:
+    try:
+        logger.info(
+            "Meeting QA request | model=%s base_url=%s question_len=%d transcript_len=%d",
+            llm_service.config.model,
+            llm_service.config.base_url,
+            len(payload.question or ""),
+            len(payload.transcript or ""),
+        )
+        answer = await run_in_threadpool(
+            llm_service.answer_question,
+            payload.transcript,
+            payload.question,
+        )
+        return MeetingQAResponse(
+            ok=True,
+            model=llm_service.config.model,
+            base_url=llm_service.config.base_url,
+            question=payload.question,
+            answer=answer,
+        )
+    except Exception as exc:
+        logger.exception("Meeting QA failed")
+        return MeetingQAResponse(
+            ok=False,
+            model=llm_service.config.model,
+            base_url=llm_service.config.base_url,
+            question=payload.question,
+            error=str(exc),
+        )
+
+
+@app.post("/api/meeting-rag/index", response_model=MeetingRagIndexResponse)
+async def meeting_rag_index(payload: MeetingRagIndexRequest) -> MeetingRagIndexResponse:
+    try:
+        count = await run_in_threadpool(
+            vector_store.index_meeting,
+            payload.meeting_id,
+            payload.transcript,
+        )
+        return MeetingRagIndexResponse(
+            ok=True,
+            meeting_id=payload.meeting_id,
+            chunks_indexed=count,
+            collection=COLLECTION_NAME,
+            embedding_model=settings.ollama_embed_model,
+        )
+    except Exception as exc:
+        return MeetingRagIndexResponse(
+            ok=False,
+            meeting_id=payload.meeting_id,
+            collection=COLLECTION_NAME,
+            embedding_model=settings.ollama_embed_model,
+            error=str(exc),
+        )
+
+
+@app.post("/api/meeting-rag/ask", response_model=MeetingQAResponse)
+async def meeting_rag_ask(payload: MeetingRagQARequest) -> MeetingQAResponse:
+    try:
+        chunks = await run_in_threadpool(
+            vector_store.query,
+            payload.meeting_id,
+            payload.question,
+            payload.top_k,
+        )
+        if not chunks and payload.transcript:
+            await run_in_threadpool(vector_store.index_meeting, payload.meeting_id, payload.transcript)
+            chunks = await run_in_threadpool(
+                vector_store.query,
+                payload.meeting_id,
+                payload.question,
+                payload.top_k,
+            )
+
+        context = "\n\n".join(
+            f"[Chunk {chunk.metadata.get('chunk_index')} | distance={chunk.distance}]\n{chunk.text}"
+            for chunk in chunks
+        )
+        if not context.strip():
+            context = payload.transcript or ""
+
+        answer = await run_in_threadpool(
+            llm_service.answer_question,
+            context,
+            payload.question,
+        )
+        return MeetingQAResponse(
+            ok=True,
+            model=llm_service.config.model,
+            base_url=llm_service.config.base_url,
+            question=payload.question,
+            answer=answer,
+            chunks=[
+                {
+                    "text": chunk.text,
+                    "metadata": chunk.metadata,
+                    "distance": chunk.distance,
+                }
+                for chunk in chunks
+            ],
+        )
+    except Exception as exc:
+        return MeetingQAResponse(
+            ok=False,
+            model=llm_service.config.model,
+            base_url=llm_service.config.base_url,
+            question=payload.question,
+            error=str(exc),
+        )
 
 
 @app.get("/models/status")
