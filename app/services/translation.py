@@ -42,15 +42,22 @@ class TranslationService:
                 model.generation_config.max_length = None
                 if hasattr(model.config, "max_length"):
                     model.config.max_length = None
-                model.to(settings.model_device)
+                model.to(self._device())
                 model.eval()
                 self._models[direction] = (tokenizer, model)
         return self._models[direction]
 
+    def _device(self) -> str:
+        requested = settings.translation_device.lower()
+        if requested in {"cuda", "gpu"} and torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+
     def translate(self, text: str, direction: Direction, max_new_tokens: int = 256) -> str:
         tokenizer, model = self._load(direction)
         inputs = tokenizer(text, return_tensors="pt", truncation=True) # type: ignore
-        inputs = {key: value.to(settings.model_device) for key, value in inputs.items()}
+        device = self._device()
+        inputs = {key: value.to(device) for key, value in inputs.items()}
         with torch.no_grad():
             output_ids = model.generate(**inputs, max_new_tokens=max_new_tokens) # type: ignore
         return tokenizer.decode(output_ids[0].detach().cpu(), skip_special_tokens=True) # type: ignore

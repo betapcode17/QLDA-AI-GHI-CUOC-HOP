@@ -55,6 +55,7 @@ def configure_local_environment() -> None:
     os.environ.setdefault("DIARIZATION_MODEL_DIR", str(PROJECT_ROOT / "diarization" / "speaker-diarization-community-1"))
     os.environ.setdefault("TRANSLATION_VI_EN_DIR", r"C:\Users\ADMIN\opus-mt-vi-en")
     os.environ.setdefault("TRANSLATION_EN_VI_DIR", r"C:\Users\ADMIN\opus-mt-en-vi")
+    os.environ.setdefault("TRANSLATION_DEVICE", "cpu")
     os.environ.setdefault("SUMMARIZATION_MODEL_DIR", str(MODEL_ROOT / "summarization" / "bart-large-cnn"))
     
     # Transformers & HF Hub settings
@@ -98,6 +99,7 @@ class Settings:
     diarization_model_dir: Path = Path(os.environ.get("DIARIZATION_MODEL_DIR", str(PROJECT_ROOT / "diarization" / "speaker-diarization-community-1")))
     translation_vi_en_dir: Path = Path(os.environ.get("TRANSLATION_VI_EN_DIR", r"C:\Users\ADMIN\opus-mt-vi-en"))
     translation_en_vi_dir: Path = Path(os.environ.get("TRANSLATION_EN_VI_DIR", r"C:\Users\ADMIN\opus-mt-en-vi"))
+    translation_device: str = os.environ.get("TRANSLATION_DEVICE", "cpu")
     summarization_model_dir: Path = Path(os.environ.get("SUMMARIZATION_MODEL_DIR", str(MODEL_ROOT / "summarization" / "bart-large-cnn")))
     
     # Language and STT settings

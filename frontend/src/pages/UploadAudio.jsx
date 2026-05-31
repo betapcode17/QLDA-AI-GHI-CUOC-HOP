@@ -11,6 +11,12 @@ const sourceLanguageLabels = {
   vi: "Vietnamese audio",
 };
 
+const getTranslationDirection = (fromLanguage, toLanguage) => {
+  if (fromLanguage === "vi" && toLanguage === "en") return "vi-en";
+  if (fromLanguage === "en" && toLanguage === "vi") return "en-vi";
+  return null;
+};
+
 const formatTime = (seconds) => {
   const totalSeconds = Math.max(0, Math.floor(seconds || 0));
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
@@ -425,7 +431,13 @@ function UploadAudio() {
     setError("");
 
     try {
-      const direction = sourceLanguage === "vi" ? "vi-en" : "en-vi";
+      const direction = getTranslationDirection(displayLanguage, nextLanguage);
+      if (!direction) {
+        setEditedTranscriptText(originalTranscriptText);
+        setDisplayLanguage(sourceLanguage);
+        resetAnalysisState();
+        return;
+      }
       const translated = await uploadService.translateText(
         editedTranscriptText,
         direction,
