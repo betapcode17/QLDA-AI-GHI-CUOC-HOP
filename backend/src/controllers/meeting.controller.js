@@ -54,7 +54,9 @@ export const meetingController = {
   importTranscripts: async (req, res, next) => { try { res.status(201).json(await meetingWorkflowService.importTranscripts(req.params.id, req.file, { replace: req.query.replace === 'true' })); } catch (e) { next(e); } },
   export: async (req, res, next) => {
     try {
-      const result = await meetingWorkflowService.exportMeeting(req.params.id, req.params.format);
+      const result = await meetingWorkflowService.exportMeeting(req.params.id, req.params.format, {
+        transcriptView: req.query.transcriptView
+      });
       res.setHeader('Content-Type', result.mimeType);
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.filename)}"`);
       res.send(result.buffer);

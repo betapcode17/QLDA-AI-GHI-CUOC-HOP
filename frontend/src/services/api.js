@@ -47,6 +47,11 @@ export const meetingService = {
     return response.data;
   },
 
+  async deleteMeeting(id) {
+    const response = await api.delete(`/meetings/${id}`);
+    return response.data;
+  },
+
   async getParticipants(meetingId) {
     const response = await api.get(`/meetings/${meetingId}/participants`);
     return response.data;
@@ -62,8 +67,23 @@ export const meetingService = {
     return response.data;
   },
 
+  async createSpeaker(meetingId, payload) {
+    const response = await api.post(`/meetings/${meetingId}/speakers`, payload);
+    return response.data;
+  },
+
+  async updateSpeaker(id, payload) {
+    const response = await api.patch(`/speakers/${id}`, payload);
+    return response.data;
+  },
+
   async getTranscripts(meetingId) {
     const response = await api.get(`/meetings/${meetingId}/transcripts`);
+    return response.data;
+  },
+
+  async updateTranscript(id, payload) {
+    const response = await api.put(`/transcripts/${id}`, payload);
     return response.data;
   },
 
@@ -140,9 +160,10 @@ export const meetingService = {
     return response.data;
   },
 
-  async exportMeeting(id, format) {
+  async exportMeeting(id, format, options = {}) {
     const response = await api.get(`/meetings/${id}/export/${format}`, {
       responseType: "blob",
+      params: options,
     });
     return response.data;
   },

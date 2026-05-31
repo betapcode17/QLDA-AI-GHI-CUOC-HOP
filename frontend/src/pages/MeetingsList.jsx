@@ -8,6 +8,8 @@ function MeetingsList() {
   const [meetings, setMeetings] = useState([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState('');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     const loadMeetings = async () => {
@@ -35,6 +37,43 @@ function MeetingsList() {
       );
     });
   }, [meetings, search]);
+
+  const handleRenameMeeting = async (meeting, nextTitle) => {
+    if (!nextTitle || nextTitle.trim() === meeting.title) return;
+
+    setSavingId(meeting.id);
+    setError('');
+    try {
+      const updated = await meetingService.updateMeeting(meeting.id, {
+        title: nextTitle.trim(),
+      });
+      setMeetings((current) =>
+        current.map((item) =>
+          item.id === meeting.id ? { ...item, ...updated, title: updated.title || nextTitle.trim() } : item,
+        ),
+      );
+    } catch (renameError) {
+      setError(renameError.message || 'Could not rename meeting.');
+    } finally {
+      setSavingId('');
+    }
+  };
+
+  const handleDeleteMeeting = async (meeting) => {
+    const confirmed = window.confirm(`Delete meeting "${meeting.title}"?`);
+    if (!confirmed) return;
+
+    setSavingId(meeting.id);
+    setError('');
+    try {
+      await meetingService.deleteMeeting(meeting.id);
+      setMeetings((current) => current.filter((item) => item.id !== meeting.id));
+    } catch (deleteError) {
+      setError(deleteError.message || 'Could not delete meeting.');
+    } finally {
+      setSavingId('');
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -70,11 +109,28 @@ function MeetingsList() {
       {loading ? (
         <LoadingState />
       ) : filteredMeetings.length > 0 ? (
+        <>
+        {error ? (
+          <div className="rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {error}
+          </div>
+        ) : null}
+        {savingId ? (
+          <div className="rounded-2xl border border-accent-400/20 bg-accent-500/10 px-4 py-3 text-sm text-accent-100">
+            Updating meeting...
+          </div>
+        ) : null}
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           {filteredMeetings.map((meeting) => (
-            <MeetingCard key={meeting.id} meeting={meeting} />
+            <MeetingCard
+              key={meeting.id}
+              meeting={meeting}
+              onRename={handleRenameMeeting}
+              onDelete={handleDeleteMeeting}
+            />
           ))}
         </div>
+        </>
       ) : (
         <div className="rounded-[28px] border border-dashed border-white/10 bg-slate-950/70 px-6 py-16 text-center text-sm text-slate-400">
           No meetings matched your search.

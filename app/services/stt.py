@@ -134,7 +134,7 @@ class STTService:
                 
         return self._model
 
-    def transcribe(self, audio_path: Path, language: str | None = None) -> TranscriptionResponse:
+    def transcribe(self, audio_path: Path, language: str | None = None, stream_callback=None) -> TranscriptionResponse:
         self._load()
         print(f"\n[STT] Transcribing: {audio_path.name}")
         print(f"[STT] Device: {settings.resolved_stt_device}")
@@ -188,15 +188,16 @@ class STTService:
                 cleaned_chunk_text = normalize_microphone_check_text(chunk_text)
                 if cleaned_chunk_text:
                     print(f"[STT] Cleaned chunk {chunk_index + 1}: {len(cleaned_chunk_text)} chars")
-                    segments.append(
-                        TranscriptSegment(
-                            id=chunk_index,
-                            start=chunk_start,
-                            end=chunk_end,
-                            text=cleaned_chunk_text,
-                        )
+                    segment = TranscriptSegment(
+                        id=chunk_index,
+                        start=chunk_start,
+                        end=chunk_end,
+                        text=cleaned_chunk_text,
                     )
+                    segments.append(segment)
                     chunk_texts.append(cleaned_chunk_text)
+                    if stream_callback is not None:
+                        stream_callback("transcript_segment", segment.model_dump())
 
             chunk_index += 1
 
@@ -206,14 +207,13 @@ class STTService:
             cleaned_text = normalize_microphone_check_text(text)
             if cleaned_text:
                 print(f"[STT] Cleaned: {len(cleaned_text)} chars")
-                segments = [
-                    TranscriptSegment(
-                        id=0,
-                        start=0.0,
-                        end=round(get_audio_duration(audio_path), 3),
-                        text=cleaned_text,
-                    )
-                ]
+                segment = TranscriptSegment(
+                    id=0,
+                    start=0.0,
+                    end=round(get_audio_duration(audio_path), 3),
+                    text=cleaned_text,
+                )
+                segments = [segment]
 
         print(f"[STT] Done: {len(text)} chars\n")
         if settings.low_vram_mode:
