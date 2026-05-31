@@ -26,6 +26,21 @@ textarea {
   font: inherit;
 }
 
+select {
+  color-scheme: dark;
+}
+
+select option {
+  background-color: #0f172a;
+  color: #f8fafc;
+}
+
+select option:checked,
+select option:hover {
+  background-color: #2563eb;
+  color: #ffffff;
+}
+
 a {
   color: inherit;
   text-decoration: none;

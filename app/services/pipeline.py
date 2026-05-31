@@ -193,9 +193,11 @@ def process_meeting_audio(
             emit_stream_event(stream_callback, "status", {"stage": "stt", "message": "Transcribing audio"})
             diarization_service.unload()
             release_cuda_memory("before whole-file STT")
-            transcript = stt_service.transcribe(normalized_audio, language=language)
-            for segment in transcript.segments:
-                emit_stream_event(stream_callback, "transcript_segment", segment.model_dump())
+            transcript = stt_service.transcribe(
+                normalized_audio,
+                language=language,
+                stream_callback=stream_callback,
+            )
             low_information = is_low_information_transcript(transcript.text)
         except Exception as e:
             warnings.append(f"STT failed: {e}")

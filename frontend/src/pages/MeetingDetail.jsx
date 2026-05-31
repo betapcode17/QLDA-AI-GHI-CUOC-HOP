@@ -5,6 +5,24 @@ import { meetingService } from "../services/api";
 
 const tabs = ["Transcript", "Speakers", "Summary", "Action Items", "Files", "Notes"];
 
+const toLocalInput = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+
+const toIsoOrNull = (value) => (value ? new Date(value).toISOString() : null);
+
+const nextSpeakerLabel = (speakers) => {
+  const used = new Set(speakers.map((speaker) => speaker.speakerLabel));
+  for (let index = 0; index < 100; index += 1) {
+    const label = `SPEAKER_${String(index).padStart(2, "0")}`;
+    if (!used.has(label)) return label;
+  }
+  return `SPEAKER_${Date.now()}`;
+};
+
 function MeetingDetail() {
   const { id } = useParams();
   const [meeting, setMeeting] = useState(null);
@@ -24,6 +42,22 @@ function MeetingDetail() {
   const [qaAnswer, setQaAnswer] = useState(null);
   const [qaLoading, setQaLoading] = useState(false);
   const [translatingTranscripts, setTranslatingTranscripts] = useState(false);
+  const [transcriptViewMode, setTranscriptViewMode] = useState("chunks");
+  const [meetingForm, setMeetingForm] = useState({
+    title: "",
+    description: "",
+    startTime: "",
+    endTime: "",
+    passcode: "",
+    status: "Scheduled",
+  });
+  const [meetingSaving, setMeetingSaving] = useState(false);
+  const [speakerDrafts, setSpeakerDrafts] = useState({});
+  const [speakerSavingId, setSpeakerSavingId] = useState("");
+  const [newSpeakerName, setNewSpeakerName] = useState("");
+  const [newSpeakerColor, setNewSpeakerColor] = useState("#60a5fa");
+  const [speakerCreating, setSpeakerCreating] = useState(false);
+  const [assigningTranscriptId, setAssigningTranscriptId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -44,6 +78,22 @@ function MeetingDetail() {
         ]);
       setMeeting(detail);
       setRelated({ participants, speakers, transcripts, summaries, actionItems, files, notes });
+      setMeetingForm({
+        title: detail.title || "",
+        description: detail.description || "",
+        startTime: toLocalInput(detail.startTime || detail.date),
+        endTime: toLocalInput(detail.endTime),
+        passcode: detail.passcode || "",
+        status: detail.status || "Scheduled",
+      });
+      setSpeakerDrafts(
+        Object.fromEntries(
+          speakers.map((speaker) => [
+            speaker.id,
+            speaker.realName || speaker.speakerLabel || "",
+          ]),
+        ),
+      );
     } catch (loadError) {
       setError(loadError.message || "Meeting could not be loaded.");
     } finally {
@@ -67,6 +117,28 @@ function MeetingDetail() {
     [related],
   );
 
+  const fullTranscriptText = useMemo(
+    () =>
+      related.transcripts
+        .map((item) => item.originalText)
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    [related.transcripts],
+  );
+
+  const fullTranslatedText = useMemo(
+    () =>
+      related.transcripts
+        .map((item) => item.translatedText)
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    [related.transcripts],
+  );
+
   const handleAddNote = async (event) => {
     event.preventDefault();
     if (!noteText.trim()) return;
@@ -77,11 +149,13 @@ function MeetingDetail() {
   };
 
   const handleExport = async (format) => {
-    const blob = await meetingService.exportMeeting(id, format);
+    const blob = await meetingService.exportMeeting(id, format, {
+      transcriptView: transcriptViewMode,
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${meeting.title}.${format}`;
+    link.download = `${meeting.title}-${transcriptViewMode}.${format}`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -137,6 +211,126 @@ function MeetingDetail() {
     }
   };
 
+  const handleMeetingFieldChange = (field, value) => {
+    setMeetingForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleSaveMeetingDetail = async (event) => {
+    event.preventDefault();
+    setMeetingSaving(true);
+    setError("");
+    try {
+      const payload = {
+        title: meetingForm.title,
+        description: meetingForm.description || null,
+        startTime: toIsoOrNull(meetingForm.startTime),
+        endTime: toIsoOrNull(meetingForm.endTime),
+        passcode: meetingForm.passcode || null,
+        status: meetingForm.status,
+      };
+      const updated = await meetingService.updateMeeting(id, payload);
+      setMeeting((current) => ({
+        ...current,
+        ...updated,
+        title: updated.title || payload.title,
+        description: updated.description ?? payload.description,
+        status: updated.status || payload.status,
+      }));
+    } catch (saveError) {
+      setError(saveError.message || "Could not update meeting detail.");
+    } finally {
+      setMeetingSaving(false);
+    }
+  };
+
+  const handleSpeakerDraftChange = (speakerId, value) => {
+    setSpeakerDrafts((current) => ({ ...current, [speakerId]: value }));
+  };
+
+  const handleSaveSpeaker = async (speaker) => {
+    const nextName = (speakerDrafts[speaker.id] || "").trim();
+    if (!nextName) return;
+
+    setSpeakerSavingId(speaker.id);
+    setError("");
+    try {
+      const updated = await meetingService.updateSpeaker(speaker.id, {
+        realName: nextName,
+      });
+      setRelated((current) => ({
+        ...current,
+        speakers: current.speakers.map((item) =>
+          item.id === speaker.id ? { ...item, ...updated } : item,
+        ),
+        transcripts: current.transcripts.map((item) =>
+          item.speakerId === speaker.id
+            ? { ...item, speaker: { ...item.speaker, ...updated } }
+            : item,
+        ),
+      }));
+    } catch (speakerError) {
+      setError(speakerError.message || "Could not update speaker name.");
+    } finally {
+      setSpeakerSavingId("");
+    }
+  };
+
+  const handleCreateSpeaker = async (event) => {
+    event.preventDefault();
+    const realName = newSpeakerName.trim();
+    if (!realName) return;
+
+    setSpeakerCreating(true);
+    setError("");
+    try {
+      const speaker = await meetingService.createSpeaker(id, {
+        speakerLabel: nextSpeakerLabel(related.speakers),
+        realName,
+        colorHex: newSpeakerColor,
+      });
+      setRelated((current) => ({
+        ...current,
+        speakers: [...current.speakers, speaker],
+      }));
+      setSpeakerDrafts((current) => ({
+        ...current,
+        [speaker.id]: speaker.realName || speaker.speakerLabel || "",
+      }));
+      setNewSpeakerName("");
+    } catch (createError) {
+      setError(createError.message || "Could not create speaker.");
+    } finally {
+      setSpeakerCreating(false);
+    }
+  };
+
+  const handleAssignTranscriptSpeaker = async (transcript, speakerId) => {
+    setAssigningTranscriptId(transcript.id);
+    setError("");
+    try {
+      await meetingService.updateTranscript(transcript.id, {
+        speakerId: speakerId || null,
+      });
+      const speaker = related.speakers.find((item) => item.id === speakerId) || null;
+      setRelated((current) => ({
+        ...current,
+        transcripts: current.transcripts.map((item) =>
+          item.id === transcript.id
+            ? {
+                ...item,
+                speakerId: speakerId || null,
+                speaker,
+              }
+            : item,
+        ),
+      }));
+    } catch (assignError) {
+      setError(assignError.message || "Could not assign speaker to chunk.");
+    } finally {
+      setAssigningTranscriptId("");
+    }
+  };
+
   if (loading) return <LoadingState cards={2} />;
 
   if (error || !meeting) {
@@ -177,6 +371,84 @@ function MeetingDetail() {
         </div>
       </section>
 
+      <form onSubmit={handleSaveMeetingDetail} className="rounded-[24px] border border-white/10 bg-slate-950/70 p-6 shadow-panel">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-accent-300">
+              Meeting information
+            </p>
+            <p className="mt-1 text-sm text-slate-400">
+              Update title, schedule, passcode, and status directly from this page.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={meetingSaving || !meetingForm.title.trim()}
+            className="rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          >
+            {meetingSaving ? "Saving..." : "Save detail"}
+          </button>
+        </div>
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <label className="space-y-2 md:col-span-2">
+            <span className="text-sm font-semibold text-slate-200">Title</span>
+            <input
+              value={meetingForm.title}
+              onChange={(event) => handleMeetingFieldChange("title", event.target.value)}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            />
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-semibold text-slate-200">Status</span>
+            <select
+              value={meetingForm.status}
+              onChange={(event) => handleMeetingFieldChange("status", event.target.value)}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            >
+              <option value="Scheduled">Scheduled</option>
+              <option value="InProgress">InProgress</option>
+              <option value="Completed">Completed</option>
+              <option value="Archived">Archived</option>
+            </select>
+          </label>
+          <label className="space-y-2 xl:col-span-3">
+            <span className="text-sm font-semibold text-slate-200">Description</span>
+            <textarea
+              value={meetingForm.description}
+              onChange={(event) => handleMeetingFieldChange("description", event.target.value)}
+              rows={3}
+              className="w-full resize-none rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            />
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-semibold text-slate-200">Start time</span>
+            <input
+              type="datetime-local"
+              value={meetingForm.startTime}
+              onChange={(event) => handleMeetingFieldChange("startTime", event.target.value)}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            />
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-semibold text-slate-200">End time</span>
+            <input
+              type="datetime-local"
+              value={meetingForm.endTime}
+              onChange={(event) => handleMeetingFieldChange("endTime", event.target.value)}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            />
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-semibold text-slate-200">Passcode</span>
+            <input
+              value={meetingForm.passcode}
+              onChange={(event) => handleMeetingFieldChange("passcode", event.target.value)}
+              className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none focus:border-accent-400"
+            />
+          </label>
+        </div>
+      </form>
+
       <div className="flex gap-2 overflow-x-auto rounded-[24px] border border-white/10 bg-slate-950/70 p-2">
         {tabs.map((tab) => (
           <button
@@ -205,6 +477,30 @@ function MeetingDetail() {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <div className="flex rounded-full border border-white/10 bg-white/5 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptViewMode("chunks")}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                      transcriptViewMode === "chunks"
+                        ? "bg-accent-500 text-white"
+                        : "text-slate-300 hover:text-white"
+                    }`}
+                  >
+                    Chunks
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTranscriptViewMode("full")}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                      transcriptViewMode === "full"
+                        ? "bg-accent-500 text-white"
+                        : "text-slate-300 hover:text-white"
+                    }`}
+                  >
+                    Full text
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={() => handleTranslateTranscripts("vi-en")}
@@ -223,31 +519,123 @@ function MeetingDetail() {
                 </button>
               </div>
             </div>
-            {related.transcripts.map((item) => (
-              <article key={item.id} className="rounded-2xl bg-white/5 p-4">
-                <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.14em] text-slate-400">
-                  <span>{item.speaker?.realName || item.speaker?.speakerLabel || "Speaker"}</span>
-                  <span>{item.startTimestamp ?? "0"}s - {item.endTimestamp ?? "0"}s</span>
-                  {item.sentimentLabel ? <span>{item.sentimentLabel}</span> : null}
+            {transcriptViewMode === "chunks" ? (
+              related.transcripts.map((item) => (
+                <article key={item.id} className="rounded-2xl bg-white/5 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-3 text-xs uppercase tracking-[0.14em] text-slate-400">
+                      <span>{item.speaker?.realName || item.speaker?.speakerLabel || "Speaker"}</span>
+                      <span>{item.startTimestamp ?? "0"}s - {item.endTimestamp ?? "0"}s</span>
+                      {item.sentimentLabel ? <span>{item.sentimentLabel}</span> : null}
+                    </div>
+                    <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                      Assign
+                      <select
+                        value={item.speakerId || ""}
+                        onChange={(event) => handleAssignTranscriptSpeaker(item, event.target.value)}
+                        disabled={assigningTranscriptId === item.id}
+                        className="rounded-full border border-white/10 bg-slate-950/80 px-3 py-2 text-xs normal-case tracking-normal text-white outline-none focus:border-accent-400 disabled:opacity-60"
+                      >
+                        <option value="">Unassigned</option>
+                        {related.speakers.map((speaker) => (
+                          <option key={speaker.id} value={speaker.id}>
+                            {speaker.realName || speaker.speakerLabel}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <p className="mt-3 text-sm leading-7 text-slate-100">{item.originalText}</p>
+                  {item.translatedText ? <p className="mt-2 text-sm leading-7 text-slate-400">{item.translatedText}</p> : null}
+                </article>
+              ))
+            ) : (
+              <article className="rounded-2xl bg-white/5 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                    Full transcript
+                  </p>
+                  <span className="rounded-full bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">
+                    {related.transcripts.length} chunks merged
+                  </span>
                 </div>
-                <p className="mt-3 text-sm leading-7 text-slate-100">{item.originalText}</p>
-                {item.translatedText ? <p className="mt-2 text-sm leading-7 text-slate-400">{item.translatedText}</p> : null}
+                <p className="mt-4 whitespace-pre-wrap text-base leading-8 text-slate-100">
+                  {fullTranscriptText || "No transcript content."}
+                </p>
+                {fullTranslatedText ? (
+                  <div className="mt-5 border-t border-white/10 pt-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                      Translation
+                    </p>
+                    <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-400">
+                      {fullTranslatedText}
+                    </p>
+                  </div>
+                ) : null}
               </article>
-            ))}
+            )}
           </div>
         ) : null}
 
         {activeTab === "Speakers" ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {related.speakers.map((speaker) => (
-              <div key={speaker.id} className="rounded-2xl bg-white/5 p-4">
-                <div className="flex items-center gap-3">
-                  <span className="h-4 w-4 rounded-full" style={{ backgroundColor: speaker.colorHex || "#60a5fa" }} />
-                  <p className="font-semibold text-white">{speaker.realName || speaker.speakerLabel}</p>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">{speaker.speakerLabel}</p>
+          <div className="space-y-5">
+            <form onSubmit={handleCreateSpeaker} className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="min-w-[220px] flex-1 space-y-2">
+                  <span className="text-sm font-semibold text-slate-200">New speaker</span>
+                  <input
+                    value={newSpeakerName}
+                    onChange={(event) => setNewSpeakerName(event.target.value)}
+                    placeholder="Speaker real name"
+                    className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-white outline-none focus:border-accent-400"
+                  />
+                </label>
+                <label className="space-y-2">
+                  <span className="text-sm font-semibold text-slate-200">Color</span>
+                  <input
+                    type="color"
+                    value={newSpeakerColor}
+                    onChange={(event) => setNewSpeakerColor(event.target.value)}
+                    className="h-12 w-16 rounded-2xl border border-white/10 bg-slate-950/70 p-1"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={speakerCreating || !newSpeakerName.trim()}
+                  className="rounded-full bg-accent-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                >
+                  {speakerCreating ? "Adding..." : "Add speaker"}
+                </button>
               </div>
-            ))}
+            </form>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {related.speakers.map((speaker) => (
+                <div key={speaker.id} className="rounded-2xl bg-white/5 p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="h-4 w-4 rounded-full" style={{ backgroundColor: speaker.colorHex || "#60a5fa" }} />
+                    <p className="font-semibold text-white">{speaker.realName || speaker.speakerLabel}</p>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-400">{speaker.speakerLabel}</p>
+                  <div className="mt-4 flex gap-2">
+                    <input
+                      value={speakerDrafts[speaker.id] || ""}
+                      onChange={(event) => handleSpeakerDraftChange(speaker.id, event.target.value)}
+                      placeholder="Real speaker name"
+                      className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-2 text-sm text-white outline-none focus:border-accent-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveSpeaker(speaker)}
+                      disabled={speakerSavingId === speaker.id || !(speakerDrafts[speaker.id] || "").trim()}
+                      className="rounded-full bg-accent-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-accent-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                    >
+                      {speakerSavingId === speaker.id ? "Saving" : "Save"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
 
